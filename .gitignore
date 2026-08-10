@@ -5,8 +5,6 @@ __pycache__/
 *.so
 *.egg
 *.egg-info/
-dist/
-build/
 .eggs/
 pip-wheel-metadata/
 .installed.cfg
@@ -53,8 +51,6 @@ celerybeat.pid
 *.pid
 
 # ── PyInstaller / build artifacts ────────────────────────────────────
-build/
-dist/
 *.spec.bak
 localpycs/
 warn-*.txt
