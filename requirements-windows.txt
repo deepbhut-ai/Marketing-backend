@@ -1,0 +1,9 @@
+# Windows-only dependencies for the AutoSocial AI agent.
+# Install on Windows IN ADDITION to requirements.txt:
+#   pip install -r requirements.txt -r requirements-windows.txt
+#
+# These packages do not exist on macOS/Linux. The agent uses native
+# fallbacks (pbcopy, AppleScript) on macOS instead.
+
+pywin32==312
+pywinauto==0.6.9

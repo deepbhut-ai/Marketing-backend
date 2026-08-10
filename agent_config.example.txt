@@ -1,0 +1,19 @@
+# AutoSocial AI Agent - URL override config
+# ============================================================
+# Place this file next to agent.exe and rename it to:
+#     agent_config.txt
+#
+# This lets the SAME agent.exe work for BOTH production and dev
+# without rebuilding. Lines starting with # are ignored.
+#
+# If this file is ABSENT (or a key is missing), the baked-in
+# PRODUCTION defaults are used:
+#     DJANGO_BASE_URL = https://agents.zettalgor.com
+#     AGENT_WS_URL    = wss://agents.zettalgor.com/ws/agent/
+#
+# To switch to LOCAL DEV, uncomment the lines below:
+# DJANGO_BASE_URL=http://127.0.0.1:8036
+# AGENT_WS_URL=ws://127.0.0.1:8036/ws/agent/
+#
+# You can also put your agent token here to skip the login prompt:
+# AGENT_TOKEN=ze_your_token_here

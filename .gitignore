@@ -1,0 +1,85 @@
+# ── Python ───────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+.installed.cfg
+*.whl
+
+# ── Virtual environments ─────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# ── Environment / secrets ────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets.json
+
+# ── IDE / editor ─────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ── Logs ─────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Media / user uploads (runtime-generated) ─────────────────────────
+media/
+!media/.gitkeep
+
+# ── Celery / scheduler runtime ───────────────────────────────────────
+celerybeat-schedule
+celerybeat-schedule.*
+celerybeat-schedule.dir/
+celerybeat.pid
+*.pid
+
+# ── PyInstaller / build artifacts ────────────────────────────────────
+build/
+dist/
+*.spec.bak
+localpycs/
+warn-*.txt
+xref-*.html
+
+# ── Local agent screenshots ──────────────────────────────────────────
+local_agent/screenshots/
+
+# ── Postman collections / personal notes ─────────────────────────────
+*.postman_collection.json
+howto*.txt
+how to*.txt
+
+# ── Test / coverage ──────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ── Database / SQLite ────────────────────────────────────────────────
+*.db
+*.sqlite
+*.sqlite3
+
+# ── Node (if any tooling is added later) ─────────────────────────────
+node_modules/

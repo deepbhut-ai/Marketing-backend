@@ -1,0 +1,1 @@
+LOG_MODE = "CLEAN"   # CLEAN or DEBUG

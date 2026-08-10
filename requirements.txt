@@ -1,0 +1,52 @@
+# ── FastAPI + ASGI server ────────────────────────────────────────────
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# ── ORM + migrations ─────────────────────────────────────────────────
+sqlalchemy==2.0.36
+greenlet==3.1.1
+alembic==1.14.0
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+
+# ── Auth (PyJWT — replaced fastapi-jwt-auth for Pydantic v2 compat) ─
+PyJWT==2.10.1
+passlib[bcrypt]==1.7.4
+bcrypt==4.2.1
+
+# ── Background tasks (same Celery stack as Django) ──────────────────
+celery==5.6.3
+redis==5.2.1
+
+# ── HTTP client for AI APIs (Zettalgor + Gemini) ────────────────────
+requests==2.32.3
+httpx==0.28.1
+
+# ── Scraping (content plans) ────────────────────────────────────────
+beautifulsoup4==4.12.3
+
+# ── Encryption (user Gemini API keys) ───────────────────────────────
+cryptography==44.0.0
+
+# ── Image handling ──────────────────────────────────────────────────
+pillow==11.1.0
+
+# ── Email validation (required by Pydantic EmailStr) ────────────────
+email-validator==2.3.0
+
+# ── Settings / env ───────────────────────────────────────────────────
+pydantic-settings==2.7.0
+pydantic==2.10.4
+
+# ── Gemini SDK (image + Veo video generation) ────────────────────────
+google-genai==1.30.0
+
+# ── Browser automation (agent) ──────────────────────────────────────
+selenium==4.46.0
+websockets==14.2
+psutil==7.2.2
+
+# ── Windows-only (skipped automatically on macOS/Linux) ─────────────
+# pywin32 and pywinauto are Windows-only. Install via requirements-windows.txt
+# on Windows. On macOS/Linux these are not needed (agent uses native fallbacks).
