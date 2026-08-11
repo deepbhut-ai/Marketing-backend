@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "agent.py", line 522, in <module>
+  File "asyncio\runners.py", line 195, in run
+  File "asyncio\runners.py", line 118, in run
+  File "asyncio\base_events.py", line 691, in run_until_complete
+  File "agent.py", line 365, in main
+  File "agent.py", line 105, in get_agent_token
+Exception: Login failed

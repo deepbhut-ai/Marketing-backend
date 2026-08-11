@@ -131,7 +131,27 @@ class BrowserManager:
     # --------------------------------------------------
 
     @staticmethod
-    def detect_chrome_profiles() -> Tuple[Path, list[str]]:
+    def _read_profile_name(profile_path: Path) -> str:
+        """Try to read the human-readable profile name from Preferences."""
+        prefs_file = profile_path / "Preferences"
+        if not prefs_file.exists():
+            return ""
+        try:
+            import json
+            with open(prefs_file, "r", encoding="utf-8") as f:
+                prefs = json.load(f)
+            profile_name = (
+                prefs.get("profile", {})
+                .get("info_cache", {})
+                .get(profile_path.name, {})
+                .get("name", "")
+            )
+            return profile_name.strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def detect_chrome_profiles() -> Tuple[Path, list[dict]]:
         base_path = BrowserManager.get_real_chrome_user_data_dir()
 
         if not base_path.exists():
@@ -143,7 +163,12 @@ class BrowserManager:
             if folder.is_dir() and (
                 folder.name == "Default" or folder.name.startswith("Profile")
             ):
-                profiles.append(folder.name)
+                display_name = BrowserManager._read_profile_name(folder)
+                profiles.append({
+                    "folder": folder.name,
+                    "name": display_name or folder.name,
+                    "path": str(folder),
+                })
 
         if not profiles:
             raise RuntimeError("No Chrome profiles found.")
@@ -222,9 +247,25 @@ class BrowserManager:
             )
 
         target_user_data_dir = Path(BrowserManager.get_autosocial_profile_dir())
-        target_profile_path = target_user_data_dir / "Default"
+        # Preserve the original profile folder name so the agent always uses
+        # the exact profile the user selected, not a generic "Default" folder.
+        target_profile_path = target_user_data_dir / source_profile_name
+
+        # Warn if Chrome is currently running — locked files (cookies, login
+        # data, passwords) won't be copied, so the imported profile may not
+        # keep the user logged in.
+        chrome_running = any(
+            p.info.get("name", "").lower() == "chrome.exe"
+            for p in psutil.process_iter(["name"])
+        )
+        if chrome_running:
+            print("\n⚠️  WARNING: Google Chrome is currently running.")
+            print("    Some files (cookies, logins) may be locked and skipped.")
+            print("    For best results, close all Chrome windows and try again.")
 
         print("\n📥 Importing selected Chrome profile...")
+        print(f"   From: {source_profile_path}")
+        print(f"   To:   {target_profile_path}")
 
         BrowserManager._safe_copy_profile_folder(
             source=source_profile_path,
@@ -240,7 +281,7 @@ class BrowserManager:
 
         print("✅ Existing Chrome profile imported successfully.")
 
-        return str(target_user_data_dir), "Default"
+        return str(target_user_data_dir), source_profile_name
 
     # --------------------------------------------------
     # Setup menu
@@ -258,14 +299,19 @@ class BrowserManager:
             source_user_data_dir, profiles = BrowserManager.detect_chrome_profiles()
 
             print("\n🔍 Available Chrome Profiles:")
+            print(f"{'#':<4} {'Folder':<12} {'Name':<25} Path")
+            print("-" * 80)
             for index, profile in enumerate(profiles, start=1):
-                print(f"{index}. {profile}")
+                folder = profile["folder"]
+                name = profile["name"]
+                path = profile["path"]
+                print(f"{index:<4} {folder:<12} {name:<25} {path}")
 
-            selected = input("Select profile number: ").strip()
+            selected = input("\nSelect profile number: ").strip()
 
             try:
                 selected_index = int(selected) - 1
-                selected_profile = profiles[selected_index]
+                selected_profile = profiles[selected_index]["folder"]
             except Exception:
                 raise ValueError("Invalid profile selection.")
 

@@ -3,6 +3,7 @@ import contextlib
 import json
 import os
 import sys
+import time
 import getpass
 from pathlib import Path
 
@@ -50,6 +51,11 @@ def _load_url_config():
                 val = val.strip()
                 if key in ("DJANGO_BASE_URL", "AGENT_WS_URL", "AGENT_TOKEN"):
                     os.environ[key] = val
+        # Mark that the token came from the local config file, NOT from the
+        # backend auto-start. This lets the agent still show the platform
+        # login menu when a user double-clicks the exe.
+        if os.getenv("AGENT_TOKEN"):
+            os.environ["AGENT_TOKEN_FROM_CONFIG"] = "1"
         print(f"[OK] Loaded overrides from {URL_CONFIG_FILE}")
     except Exception as e:
         print(f"[WARN] Could not read {URL_CONFIG_FILE}: {e}")
@@ -78,12 +84,8 @@ def log(message):
 # ===============================
 # 🔐 AUTH
 # ===============================
-def get_agent_token():
-    env_token = os.getenv("AGENT_TOKEN")
-    if env_token:
-        log("[OK] Agent token loaded from environment")
-        return env_token
-
+def _login_with_email_password():
+    """Interactive email/password login → returns agent token."""
     log("[LOGIN] Please login to connect local agent")
 
     email = input("Enter email: ").strip()
@@ -109,30 +111,77 @@ def get_agent_token():
     return data["data"]["agent_token"]
 
 
-def open_platform_login_pages(user_data_dir, profile_directory):
-    """Open Chrome with social platform login pages so the user can log in.
+def _save_token_to_config(token):
+    """Save the agent token to agent_config.txt so the agent never asks again.
 
-    Uses the SAME Chrome profile the agent will use for automation, so the
-    login sessions are preserved. The user logs in, closes Chrome, and
-    presses ENTER in the cmd. After that the agent connects to the backend.
+    Reads existing config lines (if any) and replaces/adds the AGENT_TOKEN
+    line without clobbering other keys like DJANGO_BASE_URL or AGENT_WS_URL.
     """
-    import subprocess
+    try:
+        lines = []
+        found = False
+        if os.path.exists(URL_CONFIG_FILE):
+            with open(URL_CONFIG_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if stripped.startswith("AGENT_TOKEN="):
+                        lines.append(f"AGENT_TOKEN={token}\n")
+                        found = True
+                    else:
+                        lines.append(line)
+        if not found:
+            lines.append(f"AGENT_TOKEN={token}\n")
+        with open(URL_CONFIG_FILE, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        log(f"[OK] Token saved to {URL_CONFIG_FILE} (won't ask next time)")
+    except Exception as e:
+        log(f"[WARN] Could not save token to config: {e}")
 
-    chrome_paths = [
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    ]
 
-    chrome_path = None
-    for path in chrome_paths:
-        if os.path.exists(path):
-            chrome_path = path
-            break
+def get_agent_token():
+    # 1. Auto-start mode: token passed via env var by the backend
+    env_token = os.getenv("AGENT_TOKEN")
+    if env_token:
+        log("[OK] Agent token loaded from environment")
+        return env_token
 
-    if not chrome_path:
-        print("[ERROR] Chrome not found", flush=True)
-        return
+    # 2. Interactive mode: show menu with both options
+    print()
+    print("=" * 50)
+    print("  🔐 Authentication — Choose option")
+    print("=" * 50)
+    print("  1. Enter agent token directly")
+    print("  2. Login with email & password")
+    print()
 
+    while True:
+        choice = input("Select option (1 or 2): ").strip()
+
+        if choice == "1":
+            token = input("Enter agent token: ").strip()
+            if not token:
+                log("[ERROR] Token cannot be empty. Try again.")
+                continue
+            log("[OK] Token accepted")
+            _save_token_to_config(token)
+            return token
+
+        elif choice == "2":
+            token = _login_with_email_password()
+            _save_token_to_config(token)
+            return token
+
+        else:
+            log("[ERROR] Invalid choice. Please enter 1 or 2.")
+
+
+def open_platform_login_pages(browser_manager):
+    """Open the automation Chrome with social platform login pages.
+
+    Uses the SAME Chrome instance that Selenium will control for automation,
+    so the login sessions are preserved in the exact browser session that
+    will post later. The user logs in, then presses ENTER to continue.
+    """
     urls = [
         "https://www.instagram.com/",
         "https://www.facebook.com/",
@@ -151,52 +200,26 @@ def open_platform_login_pages(user_data_dir, profile_directory):
     print("  4. X (Twitter)", flush=True)
     print("", flush=True)
 
-    subprocess.Popen([
-        chrome_path,
-        f"--user-data-dir={user_data_dir}",
-        f"--profile-directory={profile_directory}",
-        *urls
-    ])
+    try:
+        driver = browser_manager.start_browser()
+        print("[OK] Chrome opened for platform login", flush=True)
+    except Exception as e:
+        print(f"[ERROR] Could not open Chrome for login: {e}", flush=True)
+        return
 
-    print("After logging in to all platforms, close Chrome", flush=True)
-    print("and press ENTER here to continue...", flush=True)
+    # Open each platform in a new tab.
+    for url in urls:
+        try:
+            driver.execute_script(f"window.open('{url}', '_blank');")
+            time.sleep(1)
+        except Exception as e:
+            print(f"[WARN] Could not open {url}: {e}", flush=True)
+
+    print("After logging in to all platforms, press ENTER here to continue...", flush=True)
+    print("(Keep Chrome open — the agent will reuse this same browser)", flush=True)
     input()
 
-    # ── Close only the Chrome instances we opened for this profile ──
-    # Do NOT kill the user's daily Chrome. Force-killing Chrome leaves
-    # the profile in a locked/corrupted state and causes Selenium to fail
-    # with "session not created: Chrome instance exited" on the next start.
-    import subprocess
-    import time
-    from core.automation_engine.browser.browser_manager import BrowserManager
-
-    profile_pids = BrowserManager._find_chrome_processes_for_profile(user_data_dir)
-    for pid in profile_pids:
-        try:
-            subprocess.call(
-                f"taskkill /PID {pid}",
-                shell=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except Exception:
-            pass
-
-    # Give Chrome a moment to exit gracefully; if it is still running,
-    # the next start_browser() will reconnect to it instead of launching
-    # a second instance on the locked profile.
-    time.sleep(2)
-
-    # ── Clean up lock files left by the manual Chrome session ──
-    lock_files = ["SingletonLock", "SingletonSocket", "SingletonCookie"]
-    for lock in lock_files:
-        lock_path = os.path.join(user_data_dir, lock)
-        if os.path.exists(lock_path):
-            try:
-                os.remove(lock_path)
-            except Exception:
-                pass
-    print("[OK] Chrome closed and profile cleaned up", flush=True)
+    print("[OK] Platform logins done.", flush=True)
 
 # ===============================
 # 💾 PROFILE CONFIG
@@ -242,42 +265,44 @@ def load_or_create_profile():
         print(f"[OK] Using per-user Chrome profile: {chrome_user_data_dir} / {chrome_profile_dir}")
         return chrome_user_data_dir, chrome_profile_dir
 
-    auto_start = bool(os.getenv("AGENT_TOKEN"))
+    # Always use the saved profile if it exists and is valid. Detect stale
+    # configs created before the profile-name-preservation fix and force a
+    # re-selection so the user picks the correct profile.
+    def _is_stale_config(config):
+        saved_dir = config.get("user_data_dir", "")
+        saved_profile = config.get("profile_directory", "")
+        # Old generic copy: everything dumped into AutoSocialAI\chrome_profile\Default
+        if saved_profile == "Default" and saved_dir.endswith("AutoSocialAI\\chrome_profile"):
+            return True
+        # Missing/empty values
+        if not saved_dir or not saved_profile:
+            return True
+        return False
 
     if os.path.exists(CONFIG_FILE):
-        if auto_start:
-            # Non-interactive: just use the saved profile.
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-            saved_dir = config.get("user_data_dir", "")
-            if "Google\\Chrome\\User Data" not in saved_dir:
-                print("[OK] Using saved profile (auto-start)")
-                return config["user_data_dir"], config.get("profile_directory", "Default")
-            print("[WARN] Saved profile is daily Chrome profile; using dedicated automation profile.")
+        with open(CONFIG_FILE, "r") as f:
+            config = json.load(f)
 
-        print("\n[CONFIG] Chrome Profile Found")
-        print("1. Use saved profile")
-        print("2. Change / Select new profile")
-
-        choice = input("Select option: ").strip()
-
-        if choice == "1":
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-
-            print("[OK] Using saved profile")
-            return config["user_data_dir"], config.get("profile_directory", "Default")
-
+        if _is_stale_config(config):
+            print("\n[WARN] Saved profile config is stale or generic (Default).")
+            print("[INFO] Please select your Chrome profile again.")
         else:
+            print("\n[CONFIG] Chrome Profile Found")
+            print(f"   Current: {config.get('user_data_dir')} / {config.get('profile_directory')}")
+            print("1. Use saved profile")
+            print("2. Change / Select new profile")
+
+            choice = input("Select option: ").strip()
+
+            if choice == "1":
+                saved_dir = config.get("user_data_dir", "")
+                saved_profile = config.get("profile_directory", "Default")
+                print(f"[OK] Using saved profile: {saved_dir} / {saved_profile}")
+                return saved_dir, saved_profile
+
             print("[INFO] Changing profile...")
 
-    elif auto_start:
-        # No saved config + non-interactive: use the default automation profile.
-        default_dir = os.path.expandvars(r"%LOCALAPPDATA%\AutoSocialAI\chrome_profile")
-        print(f"[OK] Using default automation profile (auto-start): {default_dir}")
-        return default_dir, "Default"
-
-    # Ask again
+    # No saved config or user wants to change — ask for profile selection.
     user_data_dir, profile_directory = BrowserManager.ask_profile_setup()
 
     config = {
@@ -288,7 +313,7 @@ def load_or_create_profile():
     with open(CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=4)
 
-    print("[OK] Profile updated successfully")
+    print(f"[OK] Profile updated successfully: {user_data_dir} / {profile_directory}")
 
     return user_data_dir, profile_directory
 
@@ -296,13 +321,12 @@ def load_or_create_profile():
 # ===============================
 # 🤖 TASK EXECUTION
 # ===============================
-def run_task_silently(post_id, platform, caption, media, browser):
+def run_task_verbose(post_id, platform, caption, media, browser):
     """
-    Run automation but keep stderr visible for debugging.
+    Run automation with full output visible so the user can see what's
+    happening (which buttons are clicked, what page loaded, etc.).
     """
-    with open(os.devnull, "w", encoding="utf-8") as devnull:
-        with contextlib.redirect_stdout(devnull):
-            return run_task(post_id, platform, caption, media, browser)
+    return run_task(post_id, platform, caption, media, browser)
 
 
 def download_media_to_temp(media_list):
@@ -379,12 +403,23 @@ async def main():
 
     # ── Step 3: Platform login ────────────────────────
     # Open Chrome with social platform login pages so the user can log in.
-    # If the profile already has logins, ask if they want to skip.
+    # Uses the SAME BrowserManager instance so the automation Chrome is the
+    # same browser the user logs into.
     print("[Step 3/5] Platform Login", flush=True)
     profile_preferences = os.path.join(user_data_dir, profile_directory, "Preferences")
     has_existing_profile = os.path.exists(profile_preferences)
 
-    if has_existing_profile and os.getenv("AGENT_TOKEN"):
+    # Track whether Step 3 already opened Chrome so Step 4 doesn't try to
+    # reconnect/relaunch and accidentally close the login browser.
+    chrome_opened_in_step3 = False
+
+    # Only skip the login prompt when the agent was auto-started by the backend.
+    # When a user runs the exe interactively (even with a saved token), always
+    # show the login choice so they can re-login or use a pre-logged-in profile.
+    # Backend auto-start sets AGENT_TOKEN but NOT AGENT_TOKEN_FROM_CONFIG.
+    is_auto_start = os.getenv("AGENT_TOKEN") and not os.getenv("AGENT_TOKEN_FROM_CONFIG")
+
+    if has_existing_profile and is_auto_start:
         # Auto-start mode with existing profile — skip login prompt
         print("[OK] Chrome profile already has saved logins. Skipping.", flush=True)
         print("[INFO] To re-login, delete the profile folder and run again.\n", flush=True)
@@ -393,22 +428,55 @@ async def main():
         if has_existing_profile:
             print("[INFO] Chrome profile exists. You can re-login or skip.", flush=True)
             print("  1. Open platform login pages (re-login)", flush=True)
-            print("  2. Skip — use existing logins", flush=True)
+            print("  2. Open Chrome with existing logins", flush=True)
             choice = input("Select option (1/2): ").strip()
             if choice == "2":
+                # Open a fresh Chrome with the existing profile so the user can verify
+                # the logins are working; Step 4 will reuse this browser.
+                try:
+                    # Clean up any leftover AutoSocial Chrome/lock files from a previous
+                    # run so we don't reconnect to a stale DevTools session.
+                    BrowserManager.cleanup_chromedriver_only()
+                    for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                        lock_path = os.path.join(user_data_dir, lock)
+                        if os.path.exists(lock_path):
+                            try:
+                                os.remove(lock_path)
+                            except Exception:
+                                pass
+                    # Force a fresh launch instead of reconnecting to a stale session.
+                    browser_manager.driver = None
+                    browser_manager.start_browser()
+                    chrome_opened_in_step3 = True
+                    print("[OK] Chrome opened with existing profile.", flush=True)
+                    print("Press ENTER to continue... (keep Chrome open)", flush=True)
+                    input()
+                except Exception as e:
+                    print(f"[ERROR] Could not open Chrome: {e}", flush=True)
                 print("[OK] Using existing logins.\n", flush=True)
             else:
-                open_platform_login_pages(user_data_dir, profile_directory)
+                open_platform_login_pages(browser_manager)
+                chrome_opened_in_step3 = True
                 print("[OK] Platform logins done.\n", flush=True)
         else:
             print("[INFO] Fresh Chrome profile — please log in to platforms.", flush=True)
-            open_platform_login_pages(user_data_dir, profile_directory)
+            open_platform_login_pages(browser_manager)
+            chrome_opened_in_step3 = True
             print("[OK] Platform logins done.\n", flush=True)
 
-    # ── Step 4: Start automation Chrome ────────────────
+    # ── Step 4: Ensure automation Chrome is ready ──────
     print("[Step 4/5] Starting Chrome", flush=True)
     try:
-        browser_manager.start_browser()
+        if chrome_opened_in_step3:
+            # Step 3 already opened Chrome. Just verify the driver is still alive
+            # instead of calling start_browser() again (which can close/relaunch).
+            driver = browser_manager.driver
+            if driver is None:
+                raise RuntimeError("Chrome was not opened in Step 3")
+            _ = driver.current_window_handle
+            print("[OK] Reusing Chrome opened in Step 3", flush=True)
+        else:
+            browser_manager.start_browser()
         print("[OK] Chrome started and ready\n", flush=True)
     except Exception as e:
         print(f"[ERROR] Chrome failed: {e}", flush=True)
@@ -468,7 +536,7 @@ async def main():
                     print("[TASK] Running automation...")
                     try:
                         result = await asyncio.to_thread(
-                            run_task_silently,
+                            run_task_verbose,
                             post_id,
                             platform,
                             caption,

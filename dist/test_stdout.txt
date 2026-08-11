@@ -1,0 +1,10 @@
+==================================================
+  AutoSocial AI Agent
+==================================================
+
+[Step 1/5] Authentication
+[LOGIN] Please login to connect local agent
+Enter email: 
+[FATAL] Agent crashed: Login failed
+
+Press ENTER to exit...
