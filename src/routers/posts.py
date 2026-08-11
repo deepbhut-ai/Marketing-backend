@@ -224,23 +224,32 @@ async def list_scheduled_posts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     platform: str | None = Query(None, description="Filter by platform"),
+    status: str | None = Query(None, description="Filter by status (pending/scheduled). Default: both"),
     upcoming_only: bool = Query(True, description="Only posts scheduled in the future"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List the current user's scheduled posts (sorted by scheduled_time ascending).
+    """List the current user's pending + scheduled posts (sorted by scheduled_time ascending).
 
-    Returns posts with status=scheduled, optionally filtered to only
-    upcoming (future) scheduled times.
+    By default returns posts with status in (pending, scheduled).
+    Use ?status=pending or ?status=scheduled to filter to a single status.
+    Use ?upcoming_only=false to include past posts as well.
     """
     now = datetime.now(timezone.utc)
+
+    # Determine which statuses to fetch
+    if status:
+        statuses = [status]
+    else:
+        statuses = [Post.STATUS_PENDING, Post.STATUS_SCHEDULED]
+
     base = select(Post).options(selectinload(Post.media_files)).where(
         Post.user_id == user.id,
-        Post.status == Post.STATUS_SCHEDULED,
+        Post.status.in_(statuses),
     )
     count_base = select(Post.id).where(
         Post.user_id == user.id,
-        Post.status == Post.STATUS_SCHEDULED,
+        Post.status.in_(statuses),
     )
 
     if upcoming_only:
@@ -277,7 +286,7 @@ async def list_scheduled_posts(
 
     return {
         "success": True,
-        "message": "Scheduled posts fetched successfully",
+        "message": "Posts fetched successfully",
         "data": post_data,
         "pagination": {
             "page": page,
@@ -296,31 +305,28 @@ async def upcoming_summary(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Dashboard summary of upcoming scheduled posts.
+    """Dashboard summary of pending posts — platform-wise count only.
 
     Returns:
-      - total_scheduled: count of scheduled posts in the next `days_ahead` days
-      - by_platform: {platform: count}
-      - by_date: [{date, count, platforms: [{platform, count}]}]
-      - next_post: the soonest upcoming post (or null)
-      - pending_count: posts still pending (not yet scheduled)
+      - total_pending: total count of pending posts
+      - by_platform: {platform: count} of pending posts
     """
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(days=days_ahead)
 
-    # All scheduled posts within the window
+    # All pending posts within the window
     rows = (await db.execute(
-        select(Post).options(selectinload(Post.media_files))
+        select(Post)
         .where(
             Post.user_id == user.id,
-            Post.status == Post.STATUS_SCHEDULED,
+            Post.status == Post.STATUS_PENDING,
             Post.scheduled_time >= now,
             Post.scheduled_time <= horizon,
         )
         .order_by(Post.scheduled_time.asc())
     )).scalars().all()
 
-    # Pending count (not yet scheduled)
+    # Total pending count (all, not just window)
     pending_count = (await db.execute(
         select(func.count(Post.id)).where(
             Post.user_id == user.id,
@@ -333,59 +339,112 @@ async def upcoming_summary(
     for p in rows:
         by_platform[p.platform] = by_platform.get(p.platform, 0) + 1
 
-    # Group by date (YYYY-MM-DD)
-    by_date_map: dict[str, dict] = {}
-    for p in rows:
-        day_key = p.scheduled_time.strftime("%Y-%m-%d") if p.scheduled_time else "unknown"
-        if day_key not in by_date_map:
-            by_date_map[day_key] = {"date": day_key, "count": 0, "platforms": {}}
-        entry = by_date_map[day_key]
-        entry["count"] += 1
-        entry["platforms"][p.platform] = entry["platforms"].get(p.platform, 0) + 1
+    return {
+        "success": True,
+        "message": "Pending summary fetched",
+        "data": {
+            "total_pending": pending_count,
+            "by_platform": by_platform,
+        },
+    }
 
-    by_date = []
-    for day_key in sorted(by_date_map.keys()):
-        entry = by_date_map[day_key]
-        by_date.append({
-            "date": entry["date"],
-            "count": entry["count"],
-            "platforms": [
-                {"platform": plat, "count": cnt}
-                for plat, cnt in sorted(entry["platforms"].items())
-            ],
-        })
 
-    # Next upcoming post
-    next_post = None
-    if rows:
-        p = rows[0]
+@router.get("/history/")
+async def list_posted_and_failed_posts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    platform: str | None = Query(None, description="Filter by platform"),
+    status: str | None = Query(None, description="Filter by status (posted/failed). Default: both"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the current user's posted + failed posts with summary.
+
+    Returns post list (posted + failed) with pagination AND a summary
+    with platform-wise counts for posted and failed.
+
+    Use ?status=posted or ?status=failed to filter the list to a single status.
+    """
+    statuses = [status] if status else [Post.STATUS_POSTED, Post.STATUS_FAILED]
+
+    # ── List query ──────────────────────────────────────────────────
+    base = select(Post).options(selectinload(Post.media_files)).where(
+        Post.user_id == user.id,
+        Post.status.in_(statuses),
+    )
+    count_base = select(Post.id).where(
+        Post.user_id == user.id,
+        Post.status.in_(statuses),
+    )
+
+    if platform:
+        base = base.where(Post.platform == platform)
+        count_base = count_base.where(Post.platform == platform)
+
+    total = (await db.execute(select(func.count()).select_from(count_base.subquery()))).scalar_one()
+
+    rows_q = base.order_by(Post.id.desc()).offset((page - 1) * page_size).limit(page_size)
+    posts = (await db.execute(rows_q)).scalars().all()
+
+    post_data = []
+    for post in posts:
         media_urls = [
             f"{settings.BASE_URL}{settings.MEDIA_URL_PREFIX}/{m.file}"
-            for m in p.media_files
+            for m in post.media_files
         ]
-        next_post = {
-            "id": p.id,
-            "caption": p.caption,
+        post_data.append({
+            "id": post.id,
+            "user_id": post.user_id,
+            "caption": post.caption,
             "media": media_urls,
-            "platform": p.platform,
-            "scheduled_time": p.scheduled_time.isoformat() if p.scheduled_time else None,
-            "day_group_id": p.day_group_id,
-        }
+            "platform": post.platform,
+            "scheduled_time": post.scheduled_time.isoformat() if post.scheduled_time else None,
+            "status": post.status,
+            "post_url": post.post_url,
+            "error_message": post.error_message,
+            "day_group_id": post.day_group_id,
+        })
+
+    # ── Summary (all posted + failed, not affected by pagination) ──
+    posted_rows = (await db.execute(
+        select(Post).where(
+            Post.user_id == user.id,
+            Post.status == Post.STATUS_POSTED,
+        )
+    )).scalars().all()
+
+    failed_rows = (await db.execute(
+        select(Post).where(
+            Post.user_id == user.id,
+            Post.status == Post.STATUS_FAILED,
+        )
+    )).scalars().all()
+
+    by_platform_posted: dict[str, int] = {}
+    for p in posted_rows:
+        by_platform_posted[p.platform] = by_platform_posted.get(p.platform, 0) + 1
+
+    by_platform_failed: dict[str, int] = {}
+    for p in failed_rows:
+        by_platform_failed[p.platform] = by_platform_failed.get(p.platform, 0) + 1
 
     return {
         "success": True,
-        "message": "Upcoming summary fetched",
-        "data": {
-            "total_scheduled": len(rows),
-            "pending_count": pending_count,
-            "by_platform": by_platform,
-            "by_date": by_date,
-            "next_post": next_post,
-            "window": {
-                "from": now.isoformat(),
-                "to": horizon.isoformat(),
-                "days_ahead": days_ahead,
-            },
+        "message": "Post history fetched successfully",
+        "data": post_data,
+        "summary": {
+            "total_posted": len(posted_rows),
+            "total_failed": len(failed_rows),
+            "by_platform_posted": by_platform_posted,
+            "by_platform_failed": by_platform_failed,
+        },
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
+            "has_next": page * page_size < total,
+            "has_prev": page > 1,
         },
     }
 
