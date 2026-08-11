@@ -444,7 +444,7 @@ class BrowserManager:
 
         # Remove stale lock files that prevent Chrome from starting.
         # These are left behind when Chrome was closed improperly.
-        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
             lock_path = os.path.join(self.user_data_dir, lock)
             if os.path.exists(lock_path):
                 try:
@@ -452,10 +452,39 @@ class BrowserManager:
                 except Exception:
                     pass
 
-        # Only kill leftover chromedriver processes. NEVER kill chrome.exe
-        # here — killing the user's (or our own) Chrome leaves the profile
-        # in a locked/corrupted state and causes "Chrome instance exited".
+        # Kill leftover chromedriver processes.
         BrowserManager.cleanup_chromedriver_only()
+
+        # If an AutoSocial Chrome is already running on this profile, it is
+        # likely a stale/orphaned process from a previous crash. Close it
+        # gracefully first so the fresh launch below can claim the profile.
+        profile_pids = BrowserManager._find_chrome_processes_for_profile(self.user_data_dir)
+        if profile_pids:
+            print(f"[WARN] Found {len(profile_pids)} stale AutoSocial Chrome process(es); closing...")
+            for pid in profile_pids:
+                try:
+                    subprocess.call(
+                        f"taskkill /PID {pid}",
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+            time.sleep(3)
+            # Force-kill any survivors.
+            profile_pids = BrowserManager._find_chrome_processes_for_profile(self.user_data_dir)
+            for pid in profile_pids:
+                try:
+                    subprocess.call(
+                        f"taskkill /F /PID {pid}",
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+            time.sleep(2)
 
         options = self._build_options()
 
