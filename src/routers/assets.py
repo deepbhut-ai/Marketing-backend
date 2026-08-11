@@ -23,6 +23,8 @@ from src.core.database import get_db
 from src.dependencies.auth import get_current_user
 from src.models.accounts import User
 from src.models.assets import Asset, ASSET_TYPES, ASSET_SOURCES, EXT_BY_TYPE
+from src.models.posts import Post
+from src.models.post_media import PostMedia
 from src.schemas.assets import (
     AssetCreate, AssetUpdate, AssetOut, AssetListOut, AssetSummary,
 )
@@ -506,10 +508,49 @@ async def delete_asset(
     """Permanently delete an asset owned by the current user.
 
     Also removes the stored binary from `media/assets/` if present.
+    Blocks deletion if the asset is attached to any post that is still
+    pending, scheduled, or processing (i.e. not yet posted/failed).
     """
     asset = await _fetch_owned(asset_id, user.id, db)
     if not asset:
         return _err("Asset not found", http=404)
+
+    # Check if this asset is used by any active (not-yet-posted) post.
+    target = asset.file or asset.url
+    if target:
+        active_statuses = [
+            Post.STATUS_PENDING,
+            Post.STATUS_SCHEDULED,
+            Post.STATUS_PROCESSING,
+        ]
+        linked = (
+            await db.execute(
+                select(Post.id, Post.platform, Post.status, Post.scheduled_time)
+                .join(PostMedia, PostMedia.post_id == Post.id)
+                .where(
+                    PostMedia.file == target,
+                    Post.user_id == user.id,
+                    Post.status.in_(active_statuses),
+                )
+                .limit(10)
+            )
+        ).all()
+        if linked:
+            posts_info = [
+                {
+                    "post_id": r[0],
+                    "platform": r[1],
+                    "status": r[2],
+                    "scheduled_time": r[3].isoformat() if r[3] else None,
+                }
+                for r in linked
+            ]
+            return _err(
+                "This asset is used in a pending/scheduled post and cannot be deleted. "
+                "Remove it from those posts first.",
+                errors={"linked_posts": posts_info},
+                http=409,
+            )
 
     # Remove the binary from disk (best-effort).
     rel = asset.file
@@ -543,18 +584,18 @@ async def toggle_favorite(
     return _ok({"id": asset.id, "is_favorite": asset.is_favorite})
 
 
-@router.post("/{asset_id}/archive")
-async def toggle_archive(
+@router.post("/{asset_id}/unfavorite")
+async def unfavorite_asset(
     asset_id: int,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Toggle the is_archived flag on an asset."""
+    """Remove an asset from favorites (sets is_favorite=False)."""
     asset = await _fetch_owned(asset_id, user.id, db)
     if not asset:
         return _err("Asset not found", http=404)
-    asset.is_archived = not asset.is_archived
+    asset.is_favorite = False
     await db.flush()
     await db.refresh(asset)
-    return _ok({"id": asset.id, "is_archived": asset.is_archived})
+    return _ok({"id": asset.id, "is_favorite": asset.is_favorite})
 

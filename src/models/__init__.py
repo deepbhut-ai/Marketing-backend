@@ -7,6 +7,7 @@ from src.models.content_plans import ContentPlan, ContentPlanItem, UserAIKey
 from src.models.agent_profile import UserAgentProfile
 from src.models.credits import CreditRate, CreditLog
 from src.models.assets import Asset
+from src.models.brand import BrandProfile
 
 __all__ = [
     "User", "AgentDevice",
@@ -16,4 +17,5 @@ __all__ = [
     "UserAgentProfile",
     "CreditRate", "CreditLog",
     "Asset",
+    "BrandProfile",
 ]

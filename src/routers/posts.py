@@ -219,6 +219,177 @@ async def list_posts(
     }
 
 
+@router.get("/scheduled/")
+async def list_scheduled_posts(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    platform: str | None = Query(None, description="Filter by platform"),
+    upcoming_only: bool = Query(True, description="Only posts scheduled in the future"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the current user's scheduled posts (sorted by scheduled_time ascending).
+
+    Returns posts with status=scheduled, optionally filtered to only
+    upcoming (future) scheduled times.
+    """
+    now = datetime.now(timezone.utc)
+    base = select(Post).options(selectinload(Post.media_files)).where(
+        Post.user_id == user.id,
+        Post.status == Post.STATUS_SCHEDULED,
+    )
+    count_base = select(Post.id).where(
+        Post.user_id == user.id,
+        Post.status == Post.STATUS_SCHEDULED,
+    )
+
+    if upcoming_only:
+        base = base.where(Post.scheduled_time >= now)
+        count_base = count_base.where(Post.scheduled_time >= now)
+
+    if platform:
+        base = base.where(Post.platform == platform)
+        count_base = count_base.where(Post.platform == platform)
+
+    total = (await db.execute(select(func.count()).select_from(count_base.subquery()))).scalar_one()
+
+    # Sort by scheduled_time ascending (soonest first)
+    rows_q = base.order_by(Post.scheduled_time.asc()).offset((page - 1) * page_size).limit(page_size)
+    posts = (await db.execute(rows_q)).scalars().all()
+
+    post_data = []
+    for post in posts:
+        media_urls = [
+            f"{settings.BASE_URL}{settings.MEDIA_URL_PREFIX}/{m.file}"
+            for m in post.media_files
+        ]
+        post_data.append({
+            "id": post.id,
+            "user_id": post.user_id,
+            "caption": post.caption,
+            "media": media_urls,
+            "platform": post.platform,
+            "scheduled_time": post.scheduled_time.isoformat() if post.scheduled_time else None,
+            "status": post.status,
+            "post_url": post.post_url,
+            "day_group_id": post.day_group_id,
+        })
+
+    return {
+        "success": True,
+        "message": "Scheduled posts fetched successfully",
+        "data": post_data,
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": (total + page_size - 1) // page_size,
+            "has_next": page * page_size < total,
+            "has_prev": page > 1,
+        },
+    }
+
+
+@router.get("/upcoming/summary/")
+async def upcoming_summary(
+    days_ahead: int = Query(7, ge=1, le=90, description="How many days ahead to look"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Dashboard summary of upcoming scheduled posts.
+
+    Returns:
+      - total_scheduled: count of scheduled posts in the next `days_ahead` days
+      - by_platform: {platform: count}
+      - by_date: [{date, count, platforms: [{platform, count}]}]
+      - next_post: the soonest upcoming post (or null)
+      - pending_count: posts still pending (not yet scheduled)
+    """
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(days=days_ahead)
+
+    # All scheduled posts within the window
+    rows = (await db.execute(
+        select(Post).options(selectinload(Post.media_files))
+        .where(
+            Post.user_id == user.id,
+            Post.status == Post.STATUS_SCHEDULED,
+            Post.scheduled_time >= now,
+            Post.scheduled_time <= horizon,
+        )
+        .order_by(Post.scheduled_time.asc())
+    )).scalars().all()
+
+    # Pending count (not yet scheduled)
+    pending_count = (await db.execute(
+        select(func.count(Post.id)).where(
+            Post.user_id == user.id,
+            Post.status == Post.STATUS_PENDING,
+        )
+    )).scalar_one()
+
+    # Group by platform
+    by_platform: dict[str, int] = {}
+    for p in rows:
+        by_platform[p.platform] = by_platform.get(p.platform, 0) + 1
+
+    # Group by date (YYYY-MM-DD)
+    by_date_map: dict[str, dict] = {}
+    for p in rows:
+        day_key = p.scheduled_time.strftime("%Y-%m-%d") if p.scheduled_time else "unknown"
+        if day_key not in by_date_map:
+            by_date_map[day_key] = {"date": day_key, "count": 0, "platforms": {}}
+        entry = by_date_map[day_key]
+        entry["count"] += 1
+        entry["platforms"][p.platform] = entry["platforms"].get(p.platform, 0) + 1
+
+    by_date = []
+    for day_key in sorted(by_date_map.keys()):
+        entry = by_date_map[day_key]
+        by_date.append({
+            "date": entry["date"],
+            "count": entry["count"],
+            "platforms": [
+                {"platform": plat, "count": cnt}
+                for plat, cnt in sorted(entry["platforms"].items())
+            ],
+        })
+
+    # Next upcoming post
+    next_post = None
+    if rows:
+        p = rows[0]
+        media_urls = [
+            f"{settings.BASE_URL}{settings.MEDIA_URL_PREFIX}/{m.file}"
+            for m in p.media_files
+        ]
+        next_post = {
+            "id": p.id,
+            "caption": p.caption,
+            "media": media_urls,
+            "platform": p.platform,
+            "scheduled_time": p.scheduled_time.isoformat() if p.scheduled_time else None,
+            "day_group_id": p.day_group_id,
+        }
+
+    return {
+        "success": True,
+        "message": "Upcoming summary fetched",
+        "data": {
+            "total_scheduled": len(rows),
+            "pending_count": pending_count,
+            "by_platform": by_platform,
+            "by_date": by_date,
+            "next_post": next_post,
+            "window": {
+                "from": now.isoformat(),
+                "to": horizon.isoformat(),
+                "days_ahead": days_ahead,
+            },
+        },
+    }
+
+
 @router.delete("/{post_id}/")
 async def delete_post(
     post_id: int,

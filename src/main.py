@@ -16,7 +16,7 @@ from src.routers import (
     accounts_router, posts_router, scheduler_router,
     comments_router, content_plans_router,
     agent_profile_router, agent_router,
-    credits_router, assets_router,
+    credits_router, assets_router, brand_router,
 )
 from src.routers.websocket import router as websocket_router
 from src.services.post_scheduler_loop import start_scheduler, stop_scheduler
@@ -85,6 +85,7 @@ app.include_router(agent_profile_router)
 app.include_router(agent_router)
 app.include_router(credits_router)
 app.include_router(assets_router)
+app.include_router(brand_router)
 app.include_router(websocket_router)
 
 
