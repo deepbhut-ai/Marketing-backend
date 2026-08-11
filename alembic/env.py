@@ -1,5 +1,13 @@
 """Alembic env.py — imports all models so autogenerate works."""
+import sys
 from logging.config import fileConfig
+from pathlib import Path
+
+# Ensure the project root (the folder containing `src/`) is on sys.path
+# so `from src.* import ...` works no matter where `alembic` is launched from.
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool

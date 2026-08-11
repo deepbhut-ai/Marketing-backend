@@ -214,3 +214,6 @@ Terminal	Role	Analogy
 │         │POSTGRES │                                    LinkedIn / X          │
 │         └─────────┘                                                          │
 └──────────────────────────────────────────────────────────────────────────────┘
+
+
+PyInstaller agent_build.spec --clean --noconfirm

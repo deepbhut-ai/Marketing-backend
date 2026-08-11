@@ -3,6 +3,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
@@ -16,6 +17,7 @@ from src.dependencies.auth import get_current_user
 from src.models.accounts import User
 from src.models.posts import Post
 from src.models.post_media import PostMedia
+from src.models.assets import Asset
 from src.models.content_plans import UserAIKey
 from src.models.credits import CreditRate, CreditLog
 from src.models.credits import (
@@ -48,6 +50,43 @@ router = APIRouter(prefix="/posts", tags=["posts"])
 # "No valid dates in the given range with the selected active days".
 DAY_NAME_MAP = {0: "Mon", 1: "Tue", 2: "Wed", 3: "Thu", 4: "Fri", 5: "Sat", 6: "Sun"}
 MAX_RANGE_DAYS = 21
+
+
+async def _record_ai_asset(
+    db: AsyncSession,
+    user_id: int,
+    path: str,
+    prompt: str = "",
+    model: str = "",
+    mime_type: str = "image/png",
+) -> None:
+    """Create an Asset row (source='ai') for a generated image.
+
+    Best-effort: never raises — asset tracking must not break post
+    generation. The binary already lives on disk under MEDIA_DIR; we
+    only record its metadata so it shows up in `GET /api/assets/?source=ai`.
+    """
+    try:
+        rel = path
+        # `path` from generate_content_image is already relative to MEDIA_DIR.
+        full = settings.MEDIA_DIR / rel
+        size = full.stat().st_size if full.is_file() else None
+        name = Path(rel).name
+        asset = Asset(
+            user_id=user_id,
+            name=name[:255],
+            description=prompt[:2000] if prompt else "",
+            asset_type="image",
+            file=rel,
+            mime_type=mime_type,
+            file_size=size,
+            source="ai",
+            meta={"model": model} if model else None,
+        )
+        db.add(asset)
+        await db.flush()
+    except Exception as exc:
+        print(f"[ai-asset] WARN: failed to record AI asset: {exc}", flush=True)
 
 
 def _compute_scheduled_dates(
@@ -495,6 +534,8 @@ async def generate_captions_endpoint(
                 )
                 image_path = gen["path"]
                 print(f"[generate-captions] DEBUG: day {i} - image generated OK, path={image_path}", flush=True)
+                # Record the generated image as an AI asset (best-effort).
+                await _record_ai_asset(db, user.id, image_path, model=image_model)
             except GeminiError as e:
                 day_errors["image"] = f"Image generation failed: {e}"
                 print(f"[generate-captions] DEBUG: day {i} - GeminiError: {e}", flush=True)
@@ -907,6 +948,9 @@ async def regenerate_image_endpoint(
 
     image_url = f"{settings.BASE_URL}{settings.MEDIA_URL_PREFIX}/{gen['path']}"
 
+    # Record the generated image as an AI asset (best-effort).
+    await _record_ai_asset(db, user.id, gen["path"], prompt=gen.get("prompt", ""), model=model)
+
     # Credit log for the image generation (silent skip if no rate).
     await log_credit_async(
         db, user.id, ACTION_IMAGE_GENERATION,
@@ -1122,6 +1166,8 @@ async def regenerate_day_group_endpoint(
                 image_path = gen["path"]
                 image_prompt = gen["prompt"]
                 image_url = f"{settings.BASE_URL}{settings.MEDIA_URL_PREFIX}/{image_path}"
+                # Record the generated image as an AI asset (best-effort).
+                await _record_ai_asset(db, user.id, image_path, prompt=image_prompt, model=image_model)
             except (GeminiError, Exception) as e:
                 return {"success": False, "message": "Image generation failed", "errors": {"details": str(e)}}, 400
 

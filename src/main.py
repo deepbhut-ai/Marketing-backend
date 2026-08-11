@@ -16,7 +16,7 @@ from src.routers import (
     accounts_router, posts_router, scheduler_router,
     comments_router, content_plans_router,
     agent_profile_router, agent_router,
-    credits_router,
+    credits_router, assets_router,
 )
 from src.routers.websocket import router as websocket_router
 from src.services.post_scheduler_loop import start_scheduler, stop_scheduler
@@ -30,6 +30,7 @@ async def lifespan(app: FastAPI):
     # Ensure media dirs exist
     (settings.MEDIA_DIR / "posts").mkdir(parents=True, exist_ok=True)
     (settings.MEDIA_DIR / "content_plans").mkdir(parents=True, exist_ok=True)
+    (settings.MEDIA_DIR / "assets").mkdir(parents=True, exist_ok=True)
     # Auto-start Celery worker + beat (single process) if enabled
     start_celery()
     # Start the automatic in-process post scheduler
@@ -83,6 +84,7 @@ app.include_router(content_plans_router)
 app.include_router(agent_profile_router)
 app.include_router(agent_router)
 app.include_router(credits_router)
+app.include_router(assets_router)
 app.include_router(websocket_router)
 
 

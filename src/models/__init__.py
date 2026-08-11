@@ -6,6 +6,7 @@ from src.models.comments import PostComment, CommentSettings
 from src.models.content_plans import ContentPlan, ContentPlanItem, UserAIKey
 from src.models.agent_profile import UserAgentProfile
 from src.models.credits import CreditRate, CreditLog
+from src.models.assets import Asset
 
 __all__ = [
     "User", "AgentDevice",
@@ -14,4 +15,5 @@ __all__ = [
     "ContentPlan", "ContentPlanItem", "UserAIKey",
     "UserAgentProfile",
     "CreditRate", "CreditLog",
+    "Asset",
 ]
