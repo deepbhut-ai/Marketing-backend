@@ -217,7 +217,10 @@ def open_platform_login_pages(browser_manager):
 
     print("After logging in to all platforms, press ENTER here to continue...", flush=True)
     print("(Keep Chrome open — the agent will reuse this same browser)", flush=True)
-    input()
+    try:
+        input()
+    except EOFError:
+        print("[INFO] No console input available; continuing.", flush=True)
 
     print("[OK] Platform logins done.", flush=True)
 
@@ -450,7 +453,10 @@ async def main():
                     chrome_opened_in_step3 = True
                     print("[OK] Chrome opened with existing profile.", flush=True)
                     print("Press ENTER to continue... (keep Chrome open)", flush=True)
-                    input()
+                    try:
+                        input()
+                    except EOFError:
+                        print("[INFO] No console input available; continuing.", flush=True)
                 except Exception as e:
                     print(f"[ERROR] Could not open Chrome: {e}", flush=True)
                 print("[OK] Using existing logins.\n", flush=True)

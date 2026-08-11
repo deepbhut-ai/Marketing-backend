@@ -272,12 +272,29 @@ class BrowserManager:
             target=target_profile_path,
         )
 
-        local_state_file = source_user_data_dir / "Local State"
-        if local_state_file.exists():
-            try:
-                shutil.copy2(local_state_file, target_user_data_dir / "Local State")
-            except Exception:
-                pass
+        # Do NOT copy the original Local State file — it contains absolute
+        # paths and profile names from the original Chrome User Data dir.
+        # Instead, create a minimal Local State for this standalone profile dir.
+        local_state_file = target_user_data_dir / "Local State"
+        try:
+            import json
+            local_state = {
+                "profile": {
+                    "info_cache": {
+                        source_profile_name: {
+                            "name": source_profile_name,
+                            "is_consented_primary_account": True,
+                        }
+                    },
+                    "last_used_profiles": [source_profile_name],
+                    "last_active_profiles": [source_profile_name],
+                }
+            }
+            with open(local_state_file, "w", encoding="utf-8") as f:
+                json.dump(local_state, f)
+            print("[OK] Created fresh Local State for imported profile")
+        except Exception as e:
+            print(f"[WARN] Could not create Local State: {e}")
 
         print("✅ Existing Chrome profile imported successfully.")
 
