@@ -258,7 +258,7 @@ async def create_brand(
 @router.post("/create-with-logo")
 @router.post("/create-with-logo/")
 async def create_brand_with_logo(
-    logo: UploadFile = File(...),
+    logo: UploadFile | None = File(None),
     brand_name: str = Form(""),
     industry: str = Form(""),
     website_url: str = Form(""),
@@ -279,10 +279,12 @@ async def create_brand_with_logo(
     `brand_keywords`, `primary_colors`, `fonts`, `hashtag_pool` are
     comma-separated strings.
     """
-    # Save the logo first.
-    asset, err = await _save_logo_file(logo, user.id, db)
-    if err:
-        return _err(err, http=422)
+    # Save the logo if one was provided.
+    asset = None
+    if logo is not None:
+        asset, err = await _save_logo_file(logo, user.id, db)
+        if err:
+            return _err(err, http=422)
 
     def _split_list(s: str) -> list[str]:
         return [x.strip() for x in s.split(",") if x.strip()] if s else []
@@ -298,7 +300,7 @@ async def create_brand_with_logo(
         brand_keywords=_split_list(brand_keywords),
         primary_colors=_split_list(primary_colors),
         fonts=_split_list(fonts),
-        logo_asset_id=asset.id,
+        logo_asset_id=asset.id if asset else None,
         hashtag_pool=_split_list(hashtag_pool),
         bio=bio,
     )
@@ -356,7 +358,7 @@ async def update_brand(
 @router.put("/{brand_id}/update-with-logo/")
 async def update_brand_with_logo(
     brand_id: int,
-    logo: UploadFile = File(...),
+    logo: UploadFile | None = File(None),
     brand_name: str = Form(None),
     industry: str = Form(None),
     website_url: str = Form(None),
@@ -382,10 +384,12 @@ async def update_brand_with_logo(
     if not profile:
         return _err("Brand profile not found", http=404)
 
-    # Save the new logo first.
-    asset, err = await _save_logo_file(logo, user.id, db)
-    if err:
-        return _err(err, http=422)
+    # Save the new logo if one was provided.
+    if logo is not None:
+        asset, err = await _save_logo_file(logo, user.id, db)
+        if err:
+            return _err(err, http=422)
+        profile.logo_asset_id = asset.id
 
     def _split_list(s: str | None) -> list[str] | None:
         if s is None:
@@ -410,7 +414,6 @@ async def update_brand_with_logo(
         if v is not None:
             setattr(profile, k, v)
 
-    profile.logo_asset_id = asset.id
     await db.flush()
     await db.refresh(profile)
     logo_url = await _resolve_logo(profile, db)
@@ -437,14 +440,25 @@ async def delete_brand(
 @router.post("/{brand_id}/logo")
 async def upload_brand_logo(
     brand_id: int,
-    logo: UploadFile = File(...),
+    logo: UploadFile | None = File(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Upload a PNG logo (≤ 5 MB) for an existing brand profile."""
+    """Upload a PNG logo (≤ 5 MB) for an existing brand profile.
+
+    If no logo file is provided, returns the current logo info without
+    making any changes.
+    """
     profile = await _fetch_owned(brand_id, user.id, db)
     if not profile:
         return _err("Brand profile not found", http=404)
+
+    if logo is None:
+        logo_url = await _resolve_logo(profile, db)
+        return _ok(
+            {"brand_id": profile.id, "logo_asset_id": profile.logo_asset_id, "logo_url": logo_url},
+            message="No logo uploaded; returning current logo",
+        )
 
     asset, err = await _save_logo_file(logo, user.id, db)
     if err:
