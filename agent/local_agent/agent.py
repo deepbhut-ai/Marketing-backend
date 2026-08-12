@@ -11,7 +11,19 @@ import requests
 import websockets
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, BASE_DIR)
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+
+# Compatibility alias: the automation code still imports modules as
+# `core.automation_engine...`, but in the isolated packaging layout the package
+# actually lives under `agent/automation_engine`. Expose the agent root as a
+# synthetic `core` package so those imports keep working without rewriting the
+# whole automation tree.
+import types
+if "core" not in sys.modules:
+    core_pkg = types.ModuleType("core")
+    core_pkg.__path__ = [BASE_DIR]
+    sys.modules["core"] = core_pkg
 
 
 def _exe_dir():
@@ -181,6 +193,9 @@ def open_platform_login_pages(browser_manager):
     Uses the SAME Chrome instance that Selenium will control for automation,
     so the login sessions are preserved in the exact browser session that
     will post later. The user logs in, then presses ENTER to continue.
+
+    This uses a fresh tab per platform instead of `window.open()` because the
+    latter can be blocked or fail when the browser has no active page yet.
     """
     urls = [
         "https://www.instagram.com/",
@@ -207,13 +222,18 @@ def open_platform_login_pages(browser_manager):
         print(f"[ERROR] Could not open Chrome for login: {e}", flush=True)
         return
 
-    # Open each platform in a new tab.
-    for url in urls:
-        try:
-            driver.execute_script(f"window.open('{url}', '_blank');")
+    try:
+        # Load the first URL in the current tab so the browser has an active page.
+        driver.get(urls[0])
+        time.sleep(1)
+
+        # Open the rest as real tabs in the same browser session.
+        for url in urls[1:]:
+            driver.switch_to.new_window("tab")
+            driver.get(url)
             time.sleep(1)
-        except Exception as e:
-            print(f"[WARN] Could not open {url}: {e}", flush=True)
+    except Exception as e:
+        print(f"[WARN] Error opening platform tabs: {e}", flush=True)
 
     print("After logging in to all platforms, press ENTER here to continue...", flush=True)
     print("(Keep Chrome open — the agent will reuse this same browser)", flush=True)
@@ -416,14 +436,15 @@ async def main():
     # reconnect/relaunch and accidentally close the login browser.
     chrome_opened_in_step3 = False
 
-    # Only skip the login prompt when the agent was auto-started by the backend.
-    # When a user runs the exe interactively (even with a saved token), always
-    # show the login choice so they can re-login or use a pre-logged-in profile.
+    # Only skip the login prompt when the agent was auto-started by the backend
+    # and the user is not running it interactively. For a local/manual run, we
+    # still open the platform login pages so the user can sign in or re-login.
     # Backend auto-start sets AGENT_TOKEN but NOT AGENT_TOKEN_FROM_CONFIG.
     is_auto_start = os.getenv("AGENT_TOKEN") and not os.getenv("AGENT_TOKEN_FROM_CONFIG")
 
-    if has_existing_profile and is_auto_start:
-        # Auto-start mode with existing profile — skip login prompt
+    if has_existing_profile and is_auto_start and not os.getenv("AGENT_TOKEN_FROM_CONFIG"):
+        # Auto-start mode with existing profile — skip login prompt to avoid
+        # interrupting the backend-managed startup flow.
         print("[OK] Chrome profile already has saved logins. Skipping.", flush=True)
         print("[INFO] To re-login, delete the profile folder and run again.\n", flush=True)
     else:
@@ -434,8 +455,8 @@ async def main():
             print("  2. Open Chrome with existing logins", flush=True)
             choice = input("Select option (1/2): ").strip()
             if choice == "2":
-                # Open a fresh Chrome with the existing profile so the user can verify
-                # the logins are working; Step 4 will reuse this browser.
+                # Open a fresh Chrome with the existing profile and immediately load the
+                # platform pages so the user can verify the saved logins are working.
                 try:
                     # Clean up any leftover AutoSocial Chrome/lock files from a previous
                     # run so we don't reconnect to a stale DevTools session.
@@ -450,8 +471,9 @@ async def main():
                     # Force a fresh launch instead of reconnecting to a stale session.
                     browser_manager.driver = None
                     browser_manager.start_browser()
+                    open_platform_login_pages(browser_manager)
                     chrome_opened_in_step3 = True
-                    print("[OK] Chrome opened with existing profile.", flush=True)
+                    print("[OK] Chrome opened with existing profile and platform tabs.", flush=True)
                     print("Press ENTER to continue... (keep Chrome open)", flush=True)
                     try:
                         input()

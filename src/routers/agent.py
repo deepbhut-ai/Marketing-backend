@@ -32,10 +32,24 @@ _EXE_CANDIDATES = [
     BASE_DIR / "dist" / "agent",       # macOS / Linux build
 ]
 
+# macOS distributable installer created by build_agent_mac.sh.
+_DMG_CANDIDATES = [
+    BASE_DIR / "dist" / "AutoSocialAgent.dmg",
+    BASE_DIR / "dist" / "AutoSocialAgent.app",
+]
+
 
 def _find_agent_exe() -> Path | None:
     """Return the path to the built agent binary, or None if not found."""
     for candidate in _EXE_CANDIDATES:
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
+def _find_agent_dmg() -> Path | None:
+    """Return the macOS DMG installer path, or None if not found."""
+    for candidate in _DMG_CANDIDATES:
         if candidate.exists() and candidate.is_file():
             return candidate
     return None
@@ -59,6 +73,30 @@ async def download_agent_exe(user: User = Depends(get_current_user)):
     download_name = exe_path.name
     return FileResponse(
         path=str(exe_path),
+        media_type="application/octet-stream",
+        filename=download_name,
+        headers={"Content-Disposition": f"attachment; filename={download_name}"},
+    )
+
+
+@router.get("/download/dmg/")
+async def download_agent_dmg(user: User = Depends(get_current_user)):
+    """Download the macOS agent installer DMG for any Mac device.
+
+    This endpoint serves the generated .dmg created by build_agent_mac.sh.
+    The agent bundle installs a macOS app and connects to the backend with the
+    user's token when launched.
+    """
+    dmg_path = _find_agent_dmg()
+    if dmg_path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Mac agent DMG not found. Run ./build_agent_mac.sh first to produce dist/AutoSocialAgent.dmg.",
+        )
+
+    download_name = dmg_path.name
+    return FileResponse(
+        path=str(dmg_path),
         media_type="application/octet-stream",
         filename=download_name,
         headers={"Content-Disposition": f"attachment; filename={download_name}"},
