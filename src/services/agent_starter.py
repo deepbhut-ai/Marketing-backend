@@ -127,9 +127,11 @@ def _candidate_agent_roots() -> list[Path]:
 def _resolve_agent_paths() -> tuple[Path | None, Path | None]:
     """Find an agent script and matching Python interpreter if possible."""
     for root in _candidate_agent_roots():
-        # Prefer the real agent.py (does actual browser automation).
-        # Fall back to agent_stub.py only if agent.py is missing.
-        agent_script = root / "local_agent" / "agent.py"
+        # Prefer the new isolated agent package, but keep compatibility with the
+        # old root-level path for older setups.
+        agent_script = root / "agent" / "local_agent" / "agent.py"
+        if not agent_script.exists():
+            agent_script = root / "local_agent" / "agent.py"
         if not agent_script.exists():
             agent_script = root / "local_agent" / "agent_stub.py"
         if not agent_script.exists():

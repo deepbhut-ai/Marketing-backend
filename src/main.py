@@ -14,7 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from src.core.config import settings
 from src.routers import (
     accounts_router, posts_router, scheduler_router,
-    comments_router, content_plans_router,
+    content_plans_router,
     agent_profile_router, agent_router,
     credits_router, assets_router, brand_router,
 )
@@ -79,7 +79,6 @@ app.mount(
 app.include_router(accounts_router)
 app.include_router(posts_router)
 app.include_router(scheduler_router)
-app.include_router(comments_router)
 app.include_router(content_plans_router)
 app.include_router(agent_profile_router)
 app.include_router(agent_router)
