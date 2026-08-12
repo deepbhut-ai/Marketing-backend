@@ -224,7 +224,10 @@ async def list_scheduled_posts(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=200),
     platform: str | None = Query(None, description="Filter by platform"),
-    status: str | None = Query(None, description="Filter by status (pending/scheduled). Default: both"),
+    status: str | None = Query(
+        None,
+        description="Filter by status. Allowed values: pending, scheduled. Default: both.",
+    ),
     upcoming_only: bool = Query(True, description="Only posts scheduled in the future"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -235,6 +238,13 @@ async def list_scheduled_posts(
     Use ?status=pending or ?status=scheduled to filter to a single status.
     Use ?upcoming_only=false to include past posts as well.
     """
+    allowed_statuses = {Post.STATUS_PENDING, Post.STATUS_SCHEDULED}
+    if status is not None and status not in allowed_statuses:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid status. Allowed values: pending, scheduled",
+        )
+
     now = datetime.now(timezone.utc)
 
     # Determine which statuses to fetch
@@ -266,6 +276,26 @@ async def list_scheduled_posts(
     rows_q = base.order_by(Post.scheduled_time.asc()).offset((page - 1) * page_size).limit(page_size)
     posts = (await db.execute(rows_q)).scalars().all()
 
+    # Summary across the same filtered set (not paginated)
+    summary_rows = (await db.execute(
+        select(Post).where(
+            Post.user_id == user.id,
+            Post.status.in_(statuses),
+        )
+    )).scalars().all()
+
+    if upcoming_only:
+        summary_rows = [p for p in summary_rows if p.scheduled_time and p.scheduled_time >= now]
+    if platform:
+        summary_rows = [p for p in summary_rows if p.platform == platform]
+
+    by_platform: dict[str, int] = {}
+    by_status: dict[str, int] = {Post.STATUS_PENDING: 0, Post.STATUS_SCHEDULED: 0}
+    for p in summary_rows:
+        by_platform[p.platform] = by_platform.get(p.platform, 0) + 1
+        if p.status in by_status:
+            by_status[p.status] += 1
+
     post_data = []
     for post in posts:
         media_urls = [
@@ -288,6 +318,13 @@ async def list_scheduled_posts(
         "success": True,
         "message": "Posts fetched successfully",
         "data": post_data,
+        "summary": {
+            "total": total,
+            "pending_count": by_status.get(Post.STATUS_PENDING, 0),
+            "scheduled_count": by_status.get(Post.STATUS_SCHEDULED, 0),
+            "by_platform": by_platform,
+            "by_status": by_status,
+        },
         "pagination": {
             "page": page,
             "page_size": page_size,

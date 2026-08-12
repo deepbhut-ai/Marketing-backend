@@ -34,6 +34,7 @@ router = APIRouter(prefix="/api/assets", tags=["assets"])
 
 # Max upload size (10 MB) — only images are accepted.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024
 
 # Per-user total storage limit (500 MB).
 USER_STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
@@ -41,6 +42,16 @@ USER_STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
 # Only PNG / JPEG images are allowed for uploads.
 ALLOWED_IMAGE_MIME = {"image/png", "image/jpeg"}
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg"}
+
+# Allow common short-form / reel video uploads.
+ALLOWED_VIDEO_MIME = {
+    "video/mp4",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/webm",
+    "video/mpeg",
+}
+ALLOWED_VIDEO_EXT = {".mp4", ".mov", ".avi", ".webm", ".m4v", ".mpeg", ".mpg"}
 
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
@@ -305,6 +316,13 @@ def _is_allowed_image(upload: UploadFile) -> bool:
     return mt in ALLOWED_IMAGE_MIME or any(name.endswith(e) for e in ALLOWED_IMAGE_EXT)
 
 
+def _is_allowed_video(upload: UploadFile) -> bool:
+    """True if the file is a supported video (by mime or extension)."""
+    mt = (upload.content_type or "").lower()
+    name = (upload.filename or "").lower()
+    return mt in ALLOWED_VIDEO_MIME or any(name.endswith(e) for e in ALLOWED_VIDEO_EXT)
+
+
 def _ext_for_image(filename: str | None) -> str:
     """Choose a safe extension for an uploaded image."""
     if filename:
@@ -312,6 +330,15 @@ def _ext_for_image(filename: str | None) -> str:
         if dot and ext.lower() in {"png", "jpg", "jpeg"}:
             return f".{ext.lower()}"
     return ".png"
+
+
+def _ext_for_video(filename: str | None) -> str:
+    """Choose a safe extension for an uploaded video."""
+    if filename:
+        _, dot, ext = filename.rpartition(".")
+        if dot and ext.lower() in {"mp4", "mov", "avi", "webm", "m4v", "mpeg", "mpg"}:
+            return f".{ext.lower()}"
+    return ".mp4"
 
 
 @router.post("/upload")
@@ -444,6 +471,128 @@ async def upload_assets(
     return _ok(
         {"assets": created, "errors": errors, "count": len(created)},
         message=f"{len(created)} asset(s) uploaded",
+        http=201,
+    ), 201
+
+
+@router.post("/upload-video")
+@router.post("/upload/video")
+async def upload_video_assets(
+    files: List[UploadFile] = File(...),
+    name: str = Form(None),
+    description: str = Form(""),
+    tags: str = Form(""),
+    is_favorite: bool = Form(False),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Upload one or more video / reel files and create an asset record per file.
+
+    Accepted formats: mp4, mov, avi, webm, m4v, mpg, mpeg.
+    Max size per file: 100 MB.
+    """
+    if not files:
+        return _err("No files provided", http=422)
+
+    current_usage = (
+        await db.execute(
+            select(func.coalesce(func.sum(Asset.file_size), 0))
+            .where(Asset.user_id == user.id)
+        )
+    ).scalar_one()
+    if current_usage >= USER_STORAGE_LIMIT_BYTES:
+        return _err(
+            f"Storage limit reached ({USER_STORAGE_LIMIT_BYTES // (1024 * 1024)} MB). "
+            f"Delete some assets to free up space.",
+            http=413,
+        )
+
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    use_form_name = name and len(files) == 1
+
+    created: list[dict] = []
+    errors: list[dict] = []
+
+    for idx, upload in enumerate(files):
+        if not _is_allowed_video(upload):
+            errors.append({
+                "index": idx,
+                "filename": upload.filename,
+                "error": "Only video files are allowed (mp4, mov, avi, webm, m4v, mpg, mpeg)",
+            })
+            continue
+
+        contents = await upload.read()
+        if not contents:
+            errors.append({
+                "index": idx,
+                "filename": upload.filename,
+                "error": "File is empty",
+            })
+            continue
+        if len(contents) > MAX_VIDEO_UPLOAD_BYTES:
+            errors.append({
+                "index": idx,
+                "filename": upload.filename,
+                "error": f"Video too large (max {MAX_VIDEO_UPLOAD_BYTES // (1024 * 1024)} MB)",
+            })
+            continue
+
+        if current_usage + len(contents) > USER_STORAGE_LIMIT_BYTES:
+            errors.append({
+                "index": idx,
+                "filename": upload.filename,
+                "error": (
+                    f"Upload would exceed storage limit "
+                    f"({USER_STORAGE_LIMIT_BYTES // (1024 * 1024)} MB)"
+                ),
+            })
+            continue
+        current_usage += len(contents)
+
+        resolved_name = (name if use_form_name else "").strip() or (upload.filename or "video")
+
+        asset = Asset(
+            user_id=user.id,
+            name=resolved_name[:255],
+            description=description or "",
+            asset_type="video",
+            mime_type=upload.content_type or "video/mp4",
+            file_size=len(contents),
+            source="uploaded",
+            tags=tag_list,
+            is_favorite=is_favorite,
+        )
+        db.add(asset)
+        await db.flush()
+
+        ext = _ext_for_video(upload.filename)
+        rel_path = f"assets/{user.id}/{asset.id}-{int(datetime.now(timezone.utc).timestamp())}{ext}"
+        full_path = settings.MEDIA_DIR / rel_path
+        try:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_bytes(contents)
+        except Exception as e:
+            await db.delete(asset)
+            await db.flush()
+            errors.append({
+                "index": idx,
+                "filename": upload.filename,
+                "error": f"Failed to store file: {e}",
+            })
+            continue
+
+        asset.file = rel_path
+        await db.flush()
+        await db.refresh(asset)
+        created.append(_asset_to_dict(asset))
+
+    if not created and errors:
+        return _err("All video files rejected", errors=errors, http=422)
+
+    return _ok(
+        {"assets": created, "errors": errors, "count": len(created)},
+        message=f"{len(created)} video asset(s) uploaded",
         http=201,
     ), 201
 
