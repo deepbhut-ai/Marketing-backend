@@ -428,7 +428,7 @@ async def dashboard_overview(
     lower_bound = start_date or now - timedelta(days=30)
     upper_bound = end_date or horizon
 
-    base = select(Post).where(Post.user_id == user.id)
+    base = select(Post).options(selectinload(Post.media_files)).where(Post.user_id == user.id)
     if platform:
         base = base.where(Post.platform == platform)
     if status:
