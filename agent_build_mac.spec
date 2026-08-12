@@ -69,8 +69,12 @@ with open(bootstrap_path, "w") as f:
     f.write(env_bootstrap)
 
 # ── Analysis ────────────────────────────────────────────────────────
+agent_entry = os.path.join(PROJECT_ROOT, "agent", "local_agent", "agent.py")
+if not os.path.exists(agent_entry):
+    raise FileNotFoundError(f"Agent entry script not found: {agent_entry}")
+
 a = Analysis(
-    [bootstrap_path, os.path.join(PROJECT_ROOT, "local_agent", "agent.py")],
+    [bootstrap_path, agent_entry],
     pathex=[PROJECT_ROOT],
     binaries=[],
     datas=datas,
