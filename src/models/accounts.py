@@ -43,6 +43,7 @@ class User(Base):
     ai_key = relationship("UserAIKey", back_populates="user", uselist=False, cascade="all, delete-orphan")
     agent_profile = relationship("UserAgentProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
     credit_logs = relationship("CreditLog", back_populates="user", cascade="all, delete-orphan")
+    post_logs = relationship("PostLog", back_populates="user", cascade="all, delete-orphan")
     assets = relationship("Asset", back_populates="user", cascade="all, delete-orphan")
     brand_profile = relationship("BrandProfile", back_populates="user", uselist=False, cascade="all, delete-orphan")
 

@@ -16,12 +16,30 @@ from src.core.database import get_db
 from src.dependencies.auth import get_current_user
 from src.models.accounts import User
 from src.models.credits import CreditRate, CreditLog, DEFAULT_ACTIONS
+from src.models.credits import (
+    ACTION_IMAGE_GENERATION, ACTION_VIDEO_GENERATION, ACTION_CAPTION_GENERATION,
+)
+from src.models.posts import PostLog
 from src.schemas.credits import (
     CreditRateCreate, CreditRateUpdate, CreditRateOut,
     CreditLogCreate, CreditLogOut, CreditLogListOut, CreditUsageSummary,
 )
 
 router = APIRouter(prefix="/api/credits", tags=["credits"])
+
+# ── log_type → action_key mapping ────────────────────────────────────
+# The four log types the frontend can filter by:
+#   post    → PostLog table (post lifecycle events)
+#   image   → CreditLog where action_key = image_generation
+#   video   → CreditLog where action_key = video_generation
+#   caption → CreditLog where action_key = caption_generation
+LOG_TYPE_TO_ACTION_KEY: dict[str, str | None] = {
+    "image": ACTION_IMAGE_GENERATION,
+    "video": ACTION_VIDEO_GENERATION,
+    "caption": ACTION_CAPTION_GENERATION,
+    # "post" is handled separately — it queries the PostLog table
+}
+VALID_LOG_TYPES = ("post", "image", "video", "caption")
 
 
 # ── helpers ──────────────────────────────────────────────────────────
@@ -198,7 +216,8 @@ async def seed_default_rates(
 
 @router.get("/logs")
 async def list_logs(
-    action_key: str | None = Query(None, description="Filter by action_key"),
+    action_key: str | None = Query(None, description="Filter by action_key (image_generation / video_generation / caption_generation)"),
+    log_type: str | None = Query(None, description="Filter by log type: post / image / video / caption"),
     start_date: datetime | None = Query(None, description="ISO datetime lower bound"),
     end_date: datetime | None = Query(None, description="ISO datetime upper bound"),
     page: int = Query(1, ge=1),
@@ -206,11 +225,67 @@ async def list_logs(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List the current user's credit logs (paginated, filterable)."""
+    """List the current user's credit logs (paginated, filterable).
+
+    Supports two filter modes:
+    - ``action_key``: direct filter on CreditLog.action_key (legacy).
+    - ``log_type``: semantic filter — ``post`` queries the PostLog table,
+      while ``image`` / ``video`` / ``caption`` map to the corresponding
+      CreditLog action_key.
+    If both are given, ``log_type`` takes precedence.
+    """
+    # ── log_type=post → query PostLog table ──────────────────────────
+    if log_type == "post":
+        base = select(PostLog).where(PostLog.user_id == user.id)
+        if start_date:
+            base = base.where(PostLog.created_at >= start_date)
+        if end_date:
+            base = base.where(PostLog.created_at <= end_date)
+
+        count_q = select(func.count()).select_from(base.subquery())
+        total = (await db.execute(count_q)).scalar_one()
+
+        rows_q = (
+            base.order_by(PostLog.created_at.desc())
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+        logs = (await db.execute(rows_q)).scalars().all()
+
+        items = [
+            {
+                "id": log.id,
+                "user_id": log.user_id,
+                "log_type": "post",
+                "action": log.action,
+                "post_id": log.post_id,
+                "platform": log.platform,
+                "day_group_id": log.day_group_id,
+                "credits_used": 0,  # PostLog has no credits
+                "reference_type": "post",
+                "reference_id": log.post_id,
+                "meta": log.meta,
+                "note": log.note or "",
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in logs
+        ]
+        return _ok({
+            "items": items,
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        })
+
+    # ── log_type=image/video/caption → map to action_key ─────────────
+    effective_action_key = action_key
+    if log_type and log_type in LOG_TYPE_TO_ACTION_KEY:
+        effective_action_key = LOG_TYPE_TO_ACTION_KEY[log_type]
+
     base = select(CreditLog).where(CreditLog.user_id == user.id)
 
-    if action_key:
-        base = base.where(CreditLog.action_key == action_key)
+    if effective_action_key:
+        base = base.where(CreditLog.action_key == effective_action_key)
     if start_date:
         base = base.where(CreditLog.created_at >= start_date)
     if end_date:
@@ -228,8 +303,26 @@ async def list_logs(
     )
     logs = (await db.execute(rows_q)).scalars().all()
 
+    # Derive a friendly log_type for each row
+    def _credit_log_type(ak: str) -> str:
+        if ak == ACTION_IMAGE_GENERATION:
+            return "image"
+        if ak == ACTION_VIDEO_GENERATION:
+            return "video"
+        if ak == ACTION_CAPTION_GENERATION:
+            return "caption"
+        return ak
+
+    items = [
+        {
+            **_log_to_dict(l),
+            "log_type": _credit_log_type(l.action_key),
+        }
+        for l in logs
+    ]
+
     return _ok({
-        "items": [_log_to_dict(l) for l in logs],
+        "items": items,
         "total": total,
         "page": page,
         "page_size": page_size,
@@ -295,7 +388,15 @@ async def usage_summary(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Aggregate credit usage for the current user (total + per action)."""
+    """Aggregate credit usage for the current user (total + per action).
+
+    Returns counts broken down by the four log types:
+    - post    → number of PostLog rows
+    - image   → credits used for image_generation
+    - video   → credits used for video_generation
+    - caption → credits used for caption_generation
+    """
+    # Credit usage by action_key
     rows = await db.execute(
         select(CreditLog.action_key, func.sum(CreditLog.credits_used))
         .where(CreditLog.user_id == user.id)
@@ -308,4 +409,150 @@ async def usage_summary(
         by_action[action_key] = used
         total += used
 
-    return _ok({"total_used": total, "by_action": by_action})
+    # PostLog count (post lifecycle events)
+    post_count = (await db.execute(
+        select(func.count()).select_from(
+            select(PostLog).where(PostLog.user_id == user.id).subquery()
+        )
+    )).scalar_one()
+
+    # Build a by_log_type summary
+    by_log_type: dict[str, dict] = {
+        "post": {"count": int(post_count or 0), "credits_used": 0},
+        "image": {"count": 0, "credits_used": by_action.get(ACTION_IMAGE_GENERATION, 0)},
+        "video": {"count": 0, "credits_used": by_action.get(ACTION_VIDEO_GENERATION, 0)},
+        "caption": {"count": 0, "credits_used": by_action.get(ACTION_CAPTION_GENERATION, 0)},
+    }
+
+    # Fill in counts for credit-based log types
+    for ak, lt in [
+        (ACTION_IMAGE_GENERATION, "image"),
+        (ACTION_VIDEO_GENERATION, "video"),
+        (ACTION_CAPTION_GENERATION, "caption"),
+    ]:
+        cnt = (await db.execute(
+            select(func.count()).select_from(
+                select(CreditLog).where(
+                    CreditLog.user_id == user.id,
+                    CreditLog.action_key == ak,
+                ).subquery()
+            )
+        )).scalar_one()
+        by_log_type[lt]["count"] = int(cnt or 0)
+
+    return _ok({
+        "total_used": total,
+        "by_action": by_action,
+        "by_log_type": by_log_type,
+    })
+
+
+# ── Unified all-logs endpoint ────────────────────────────────────────
+
+@router.get("/all-logs")
+async def list_all_logs(
+    log_type: str | None = Query(None, description="Filter by log type: post / image / video / caption"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Unified logs endpoint — merges PostLog + CreditLog into one feed.
+
+    Each item has a ``log_type`` field:
+    - ``post``    → from PostLog (post lifecycle: created/scheduled/regenerated/deleted)
+    - ``image``   → from CreditLog (action_key=image_generation)
+    - ``video``   → from CreditLog (action_key=video_generation)
+    - ``caption`` → from CreditLog (action_key=caption_generation)
+
+    Filter with ``?log_type=post`` / ``?log_type=image`` etc.
+    If ``log_type`` is omitted, all four types are merged (sorted by created_at desc).
+    """
+    credit_items: list[dict] = []
+    post_items: list[dict] = []
+
+    # ── Determine which types to fetch ───────────────────────────────
+    fetch_post = log_type is None or log_type == "post"
+    fetch_credit = log_type is None or log_type in LOG_TYPE_TO_ACTION_KEY
+
+    # ── Fetch CreditLog rows ─────────────────────────────────────────
+    if fetch_credit:
+        credit_base = select(CreditLog).where(CreditLog.user_id == user.id)
+        if log_type and log_type in LOG_TYPE_TO_ACTION_KEY:
+            credit_base = credit_base.where(
+                CreditLog.action_key == LOG_TYPE_TO_ACTION_KEY[log_type]
+            )
+        if start_date:
+            credit_base = credit_base.where(CreditLog.created_at >= start_date)
+        if end_date:
+            credit_base = credit_base.where(CreditLog.created_at <= end_date)
+
+        credit_rows = (await db.execute(
+            credit_base.order_by(CreditLog.created_at.desc())
+        )).scalars().all()
+
+        def _credit_log_type(ak: str) -> str:
+            if ak == ACTION_IMAGE_GENERATION:
+                return "image"
+            if ak == ACTION_VIDEO_GENERATION:
+                return "video"
+            if ak == ACTION_CAPTION_GENERATION:
+                return "caption"
+            return ak
+
+        credit_items = [
+            {
+                **_log_to_dict(l),
+                "log_type": _credit_log_type(l.action_key),
+            }
+            for l in credit_rows
+        ]
+
+    # ── Fetch PostLog rows ───────────────────────────────────────────
+    if fetch_post:
+        post_base = select(PostLog).where(PostLog.user_id == user.id)
+        if start_date:
+            post_base = post_base.where(PostLog.created_at >= start_date)
+        if end_date:
+            post_base = post_base.where(PostLog.created_at <= end_date)
+
+        post_rows = (await db.execute(
+            post_base.order_by(PostLog.created_at.desc())
+        )).scalars().all()
+
+        post_items = [
+            {
+                "id": log.id,
+                "user_id": log.user_id,
+                "log_type": "post",
+                "action": log.action,
+                "post_id": log.post_id,
+                "platform": log.platform,
+                "day_group_id": log.day_group_id,
+                "credits_used": 0,
+                "reference_type": "post",
+                "reference_id": log.post_id,
+                "meta": log.meta,
+                "note": log.note or "",
+                "created_at": log.created_at.isoformat() if log.created_at else None,
+            }
+            for log in post_rows
+        ]
+
+    # ── Merge + sort by created_at desc ──────────────────────────────
+    all_items = credit_items + post_items
+    all_items.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+
+    total = len(all_items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    paged = all_items[start:end]
+
+    return _ok({
+        "items": paged,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    })

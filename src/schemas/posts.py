@@ -218,3 +218,28 @@ class FinalSubmitRequest(BaseModel):
     are updated and status flipped pending → scheduled.
     """
     items: list[FinalSubmitItem]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# PostLog — post lifecycle audit log
+# ──────────────────────────────────────────────────────────────────────────
+
+class PostLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    user_id: int
+    post_id: int | None = None
+    action: str
+    platform: str | None = None
+    day_group_id: str | None = None
+    meta: dict | None = None
+    note: str
+    created_at: datetime
+
+
+class PostLogListOut(BaseModel):
+    items: list[PostLogOut]
+    total: int
+    page: int
+    page_size: int

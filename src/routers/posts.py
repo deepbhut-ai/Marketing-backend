@@ -15,7 +15,7 @@ from src.core.config import settings
 from src.core.database import get_db
 from src.dependencies.auth import get_current_user
 from src.models.accounts import User
-from src.models.posts import Post
+from src.models.posts import Post, PostLog
 from src.models.post_media import PostMedia
 from src.models.assets import Asset
 from src.models.content_plans import UserAIKey
@@ -26,6 +26,7 @@ from src.models.credits import (
 )
 from src.services.crypto import decrypt
 from src.services.credits import log_credit_async
+from src.services.post_log import log_post_event
 from src.services.zettalgor import (
     ZettalgorError,
     enhance_description, generate_batch_captions, regenerate_single_caption,
@@ -666,6 +667,16 @@ async def delete_post(
             except Exception:
                 pass
 
+    # Post lifecycle log — record deletion (before FK is nullified)
+    await log_post_event(
+        db, user.id, PostLog.ACTION_DELETED,
+        post_id=post.id,
+        platform=post.platform,
+        day_group_id=post.day_group_id,
+        meta={"status": post.status},
+        note="delete_post",
+    )
+
     # Delete the post (cascade deletes PostMedia rows)
     await db.delete(post)
     await db.commit()
@@ -783,6 +794,16 @@ async def schedule_single_post(
     for media_item in media_list:
         if media_item:
             db.add(PostMedia(post_id=post.id, file=media_item))
+
+    # Post lifecycle log
+    await log_post_event(
+        db, user.id, PostLog.ACTION_CREATED,
+        post_id=post.id,
+        platform=platform,
+        day_group_id=day_group_id,
+        meta={"source": "manual_schedule", "scheduled_time": scheduled_time.isoformat()},
+        note="schedule_single_post",
+    )
 
     await db.commit()
 
@@ -1012,6 +1033,16 @@ async def generate_captions_endpoint(
                 db.add(PostMedia(post_id=post.id, file=image_path))
             if video_path:
                 db.add(PostMedia(post_id=post.id, file=video_path))
+
+            # Post lifecycle log — record creation of this post
+            await log_post_event(
+                db, user.id, PostLog.ACTION_CREATED,
+                post_id=post.id,
+                platform=norm_platform,
+                day_group_id=day_group_id,
+                meta={"day": i, "source": "generate_captions"},
+                note="generate-captions",
+            )
 
             day_post_ids.append(post.id)
             created_posts.append({
@@ -1264,6 +1295,15 @@ async def regenerate_caption_endpoint(
         note="regenerate-caption",
     )
 
+    # Post lifecycle log
+    await log_post_event(
+        db, user.id, PostLog.ACTION_REGENERATED_CAPTION,
+        post_id=request.post_id,
+        platform=_normalize_platform(request.platform),
+        meta={"day": request.day, "prompt": request.prompt[:80]} if request.prompt else {"day": request.day},
+        note="regenerate-caption",
+    )
+
     # Update post caption + bump regen counter
     post_details = None
     if post_obj:
@@ -1371,6 +1411,15 @@ async def regenerate_image_endpoint(
         note="regenerate-image",
     )
 
+    # Post lifecycle log
+    await log_post_event(
+        db, user.id, PostLog.ACTION_REGENERATED_IMAGE,
+        post_id=request.post_id,
+        platform=platform,
+        meta={"day": request.day, "model": model, "media": gen["path"]},
+        note="regenerate-image",
+    )
+
     # If a post_id is given, attach the generated image to that post
     post_details = None
     if post_obj:
@@ -1453,6 +1502,15 @@ async def regenerate_video_endpoint(
         db, user.id, ACTION_VIDEO_GENERATION,
         reference_type="post",
         reference_id=request.post_id,
+        meta={"day": request.day, "model": model, "media": gen["path"]},
+        note="regenerate-video",
+    )
+
+    # Post lifecycle log
+    await log_post_event(
+        db, user.id, PostLog.ACTION_REGENERATED_VIDEO,
+        post_id=request.post_id,
+        platform=platform,
         meta={"day": request.day, "model": model, "media": gen["path"]},
         note="regenerate-video",
     )
@@ -1669,6 +1727,24 @@ async def regenerate_day_group_endpoint(
             note="regenerate-day-group video",
         )
 
+    # ── Post lifecycle log (one per day group) ───────────────────────
+    regen_actions = []
+    if update_caption:
+        regen_actions.append("caption")
+    if update_image and image_path:
+        regen_actions.append("image")
+    if update_video and video_path:
+        regen_actions.append("video")
+    if regen_actions:
+        await log_post_event(
+            db, user.id, PostLog.ACTION_REGENERATED_DAY_GROUP,
+            post_id=post_ids[0] if post_ids else None,
+            platform=_normalize_platform(request.platform),
+            day_group_id=request.day_group_id,
+            meta={"day": request.day, "regenerated": regen_actions},
+            note="regenerate-day-group",
+        )
+
     # Build the single AI caption item for the response (same shape as generate-captions)
     scheduled_time_iso = updated_posts[0]["scheduled_time"] if updated_posts else request.scheduled_at
     items = []
@@ -1757,6 +1833,15 @@ async def final_submit_endpoint(
             # (Already-scheduled/posted posts are left untouched.)
             if post.status == Post.STATUS_PENDING:
                 post.status = Post.STATUS_SCHEDULED
+                # Post lifecycle log — record the scheduling event
+                await log_post_event(
+                    db, user.id, PostLog.ACTION_SCHEDULED,
+                    post_id=post.id,
+                    platform=post.platform,
+                    day_group_id=post.day_group_id,
+                    meta={"source": "final_submit"},
+                    note="final-submit",
+                )
             scheduled_post_ids.append(post.id)
 
     await db.flush()
@@ -1769,4 +1854,113 @@ async def final_submit_endpoint(
             "post_ids": scheduled_post_ids,
             "skipped_groups": skipped_groups,
         },
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Post Log — lifecycle audit log endpoints
+# ──────────────────────────────────────────────────────────────────────────
+
+def _post_log_to_dict(log: PostLog) -> dict:
+    return {
+        "id": log.id,
+        "user_id": log.user_id,
+        "post_id": log.post_id,
+        "action": log.action,
+        "platform": log.platform,
+        "day_group_id": log.day_group_id,
+        "meta": log.meta,
+        "note": log.note or "",
+        "created_at": log.created_at.isoformat() if log.created_at else None,
+    }
+
+
+@router.get("/logs/")
+async def list_post_logs(
+    action: str | None = Query(None, description="Filter by action (created/scheduled/regenerated_caption/etc.)"),
+    platform: str | None = Query(None, description="Filter by platform"),
+    day_group_id: str | None = Query(None, description="Filter by day_group_id"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List the current user's post lifecycle logs (paginated, filterable)."""
+    base = select(PostLog).where(PostLog.user_id == user.id)
+
+    if action:
+        base = base.where(PostLog.action == action)
+    if platform:
+        base = base.where(PostLog.platform == platform)
+    if day_group_id:
+        base = base.where(PostLog.day_group_id == day_group_id)
+    if start_date:
+        base = base.where(PostLog.created_at >= start_date)
+    if end_date:
+        base = base.where(PostLog.created_at <= end_date)
+
+    # total count
+    count_q = select(func.count()).select_from(base.subquery())
+    total = (await db.execute(count_q)).scalar_one()
+
+    # paged rows
+    rows_q = (
+        base.order_by(PostLog.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    logs = (await db.execute(rows_q)).scalars().all()
+
+    return {
+        "success": True,
+        "message": "OK",
+        "data": {
+            "items": [_post_log_to_dict(l) for l in logs],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+        },
+    }
+
+
+@router.get("/logs/{log_id}/")
+async def get_post_log(
+    log_id: int,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a single post log owned by the current user."""
+    result = await db.execute(
+        select(PostLog).where(PostLog.id == log_id, PostLog.user_id == user.id)
+    )
+    log = result.scalar_one_or_none()
+    if not log:
+        return {"success": False, "message": "Log not found", "errors": {}}, 404
+    return {"success": True, "message": "OK", "data": _post_log_to_dict(log)}
+
+
+@router.get("/logs/summary/")
+async def post_log_summary(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Aggregate post log counts for the current user (total + per action)."""
+    rows = await db.execute(
+        select(PostLog.action, func.count(PostLog.id))
+        .where(PostLog.user_id == user.id)
+        .group_by(PostLog.action)
+    )
+    by_action: dict[str, int] = {}
+    total = 0
+    for act, cnt in rows.all():
+        cnt = int(cnt or 0)
+        by_action[act] = cnt
+        total += cnt
+
+    return {
+        "success": True,
+        "message": "OK",
+        "data": {"total": total, "by_action": by_action},
     }
