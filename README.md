@@ -217,3 +217,10 @@ Terminal	Role	Analogy
 
 
 PyInstaller agent_build.spec --clean --noconfirm
+
+
+# Decompress
+gunzip backups/zetta_social_20260812_101824.sql.gz
+
+# Restore
+psql -U postgres -h localhost -d zetta_social -f backups/zetta_social_20260812_101824.sql
