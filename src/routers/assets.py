@@ -32,11 +32,11 @@ from src.schemas.assets import (
 router = APIRouter(prefix="/api/assets", tags=["assets"])
 
 
-# Max upload size (10 MB) — only images are accepted.
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
-MAX_VIDEO_UPLOAD_BYTES = 100 * 1024 * 1024
+# Max upload size per file: 15 MB for both images and videos.
+MAX_UPLOAD_BYTES = 15 * 1024 * 1024
+MAX_VIDEO_UPLOAD_BYTES = 15 * 1024 * 1024
 
-# Per-user total storage limit (500 MB).
+# Per-user total storage limit (500 MB) shared across all asset types.
 USER_STORAGE_LIMIT_BYTES = 500 * 1024 * 1024
 
 # Only PNG / JPEG images are allowed for uploads.
@@ -366,9 +366,9 @@ async def upload_assets(
     if not files:
         return _err("No files provided", http=422)
 
-    # Per-user storage quota: sum of all file_size values must stay under
-    # USER_STORAGE_LIMIT_BYTES (500 MB). We check the current usage once
-    # before processing the batch.
+    # Per-user storage quota: sum of all file_size values across images + videos
+    # must stay under USER_STORAGE_LIMIT_BYTES (500 MB). We check the current
+    # usage once before processing the batch.
     current_usage = (
         await db.execute(
             select(func.coalesce(func.sum(Asset.file_size), 0))

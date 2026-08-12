@@ -164,6 +164,8 @@ async def list_posts(
     page_size: int = Query(20, ge=1, le=200),
     status: str | None = Query(None, description="Filter by status (pending/scheduled/posted/failed)"),
     platform: str | None = Query(None, description="Filter by platform"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound for scheduled_time"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound for scheduled_time"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -174,6 +176,10 @@ async def list_posts(
         base = base.where(Post.status == status)
     if platform:
         base = base.where(Post.platform == platform)
+    if start_date:
+        base = base.where(Post.scheduled_time >= start_date)
+    if end_date:
+        base = base.where(Post.scheduled_time <= end_date)
 
     # Total count (for pagination metadata)
     count_base = select(Post.id).where(Post.user_id == user.id)
@@ -181,6 +187,10 @@ async def list_posts(
         count_base = count_base.where(Post.status == status)
     if platform:
         count_base = count_base.where(Post.platform == platform)
+    if start_date:
+        count_base = count_base.where(Post.scheduled_time >= start_date)
+    if end_date:
+        count_base = count_base.where(Post.scheduled_time <= end_date)
     total = (await db.execute(select(func.count()).select_from(count_base.subquery()))).scalar_one()
 
     # Paginated rows (newest first)
@@ -228,6 +238,8 @@ async def list_scheduled_posts(
         None,
         description="Filter by status. Allowed values: pending, scheduled. Default: both.",
     ),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound for scheduled_time"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound for scheduled_time"),
     upcoming_only: bool = Query(True, description="Only posts scheduled in the future"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -265,6 +277,12 @@ async def list_scheduled_posts(
     if upcoming_only:
         base = base.where(Post.scheduled_time >= now)
         count_base = count_base.where(Post.scheduled_time >= now)
+    if start_date:
+        base = base.where(Post.scheduled_time >= start_date)
+        count_base = count_base.where(Post.scheduled_time >= start_date)
+    if end_date:
+        base = base.where(Post.scheduled_time <= end_date)
+        count_base = count_base.where(Post.scheduled_time <= end_date)
 
     if platform:
         base = base.where(Post.platform == platform)
@@ -339,6 +357,8 @@ async def list_scheduled_posts(
 @router.get("/upcoming/summary/")
 async def upcoming_summary(
     days_ahead: int = Query(7, ge=1, le=90, description="How many days ahead to look"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound override"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound override"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -350,6 +370,8 @@ async def upcoming_summary(
     """
     now = datetime.now(timezone.utc)
     horizon = now + timedelta(days=days_ahead)
+    lower_bound = start_date or now
+    upper_bound = end_date or horizon
 
     # All pending posts within the window
     rows = (await db.execute(
@@ -357,8 +379,8 @@ async def upcoming_summary(
         .where(
             Post.user_id == user.id,
             Post.status == Post.STATUS_PENDING,
-            Post.scheduled_time >= now,
-            Post.scheduled_time <= horizon,
+            Post.scheduled_time >= lower_bound,
+            Post.scheduled_time <= upper_bound,
         )
         .order_by(Post.scheduled_time.asc())
     )).scalars().all()
@@ -368,6 +390,8 @@ async def upcoming_summary(
         select(func.count(Post.id)).where(
             Post.user_id == user.id,
             Post.status == Post.STATUS_PENDING,
+            Post.scheduled_time >= lower_bound,
+            Post.scheduled_time <= upper_bound,
         )
     )).scalar_one()
 
@@ -392,6 +416,8 @@ async def list_posted_and_failed_posts(
     page_size: int = Query(20, ge=1, le=200),
     platform: str | None = Query(None, description="Filter by platform"),
     status: str | None = Query(None, description="Filter by status (posted/failed). Default: both"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound for scheduled_time"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound for scheduled_time"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -417,6 +443,12 @@ async def list_posted_and_failed_posts(
     if platform:
         base = base.where(Post.platform == platform)
         count_base = count_base.where(Post.platform == platform)
+    if start_date:
+        base = base.where(Post.scheduled_time >= start_date)
+        count_base = count_base.where(Post.scheduled_time >= start_date)
+    if end_date:
+        base = base.where(Post.scheduled_time <= end_date)
+        count_base = count_base.where(Post.scheduled_time <= end_date)
 
     total = (await db.execute(select(func.count()).select_from(count_base.subquery()))).scalar_one()
 
@@ -443,19 +475,26 @@ async def list_posted_and_failed_posts(
         })
 
     # ── Summary (all posted + failed, not affected by pagination) ──
-    posted_rows = (await db.execute(
-        select(Post).where(
-            Post.user_id == user.id,
-            Post.status == Post.STATUS_POSTED,
-        )
-    )).scalars().all()
+    posted_query = select(Post).where(
+        Post.user_id == user.id,
+        Post.status == Post.STATUS_POSTED,
+    )
+    failed_query = select(Post).where(
+        Post.user_id == user.id,
+        Post.status == Post.STATUS_FAILED,
+    )
+    if platform:
+        posted_query = posted_query.where(Post.platform == platform)
+        failed_query = failed_query.where(Post.platform == platform)
+    if start_date:
+        posted_query = posted_query.where(Post.scheduled_time >= start_date)
+        failed_query = failed_query.where(Post.scheduled_time >= start_date)
+    if end_date:
+        posted_query = posted_query.where(Post.scheduled_time <= end_date)
+        failed_query = failed_query.where(Post.scheduled_time <= end_date)
 
-    failed_rows = (await db.execute(
-        select(Post).where(
-            Post.user_id == user.id,
-            Post.status == Post.STATUS_FAILED,
-        )
-    )).scalars().all()
+    posted_rows = (await db.execute(posted_query)).scalars().all()
+    failed_rows = (await db.execute(failed_query)).scalars().all()
 
     by_platform_posted: dict[str, int] = {}
     for p in posted_rows:

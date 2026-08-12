@@ -160,6 +160,8 @@ async def list_brands(
     page_size: int = Query(20, ge=1, le=200),
     search: str | None = Query(None, description="Search brand_name / industry / bio"),
     industry: str | None = Query(None, description="Filter by industry"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound for created_at"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound for created_at"),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -187,6 +189,12 @@ async def list_brands(
                 BrandProfile.bio.ilike(pattern),
             )
         )
+    if start_date:
+        base = base.where(BrandProfile.created_at >= start_date)
+        count_base = count_base.where(BrandProfile.created_at >= start_date)
+    if end_date:
+        base = base.where(BrandProfile.created_at <= end_date)
+        count_base = count_base.where(BrandProfile.created_at <= end_date)
 
     total = (
         await db.execute(select(func.count()).select_from(count_base.subquery()))
