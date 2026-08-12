@@ -15,15 +15,16 @@ if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
 # Compatibility alias: the automation code still imports modules as
-# `core.automation_engine...`, but in the isolated packaging layout the package
-# actually lives under `agent/automation_engine`. Expose the agent root as a
-# synthetic `core` package so those imports keep working without rewriting the
-# whole automation tree.
+# `core.automation_engine...`. In dev (non-frozen) mode the package lives
+# under `agent/automation_engine`, so we expose the agent root as a synthetic
+# `core` package. In the frozen exe, the real `core` package is bundled by
+# PyInstaller and used directly — no alias needed.
 import types
-if "core" not in sys.modules:
-    core_pkg = types.ModuleType("core")
-    core_pkg.__path__ = [BASE_DIR]
-    sys.modules["core"] = core_pkg
+if not getattr(sys, "frozen", False):
+    if "core" not in sys.modules:
+        core_pkg = types.ModuleType("core")
+        core_pkg.__path__ = [BASE_DIR]
+        sys.modules["core"] = core_pkg
 
 
 def _exe_dir():
