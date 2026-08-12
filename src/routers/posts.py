@@ -410,6 +410,111 @@ async def upcoming_summary(
     }
 
 
+@router.get("/dashboard/")
+async def dashboard_overview(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=50),
+    platform: str | None = Query(None, description="Optional platform filter"),
+    status: str | None = Query(None, description="Optional status filter (pending/scheduled/posted/failed)"),
+    start_date: datetime | None = Query(None, description="ISO datetime lower bound for scheduled_time"),
+    end_date: datetime | None = Query(None, description="ISO datetime upper bound for scheduled_time"),
+    days_ahead: int = Query(7, ge=1, le=90, description="Look-ahead window for upcoming pending posts"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Single dashboard API for summary metrics and recent post activity."""
+    now = datetime.now(timezone.utc)
+    horizon = now + timedelta(days=days_ahead)
+    lower_bound = start_date or now - timedelta(days=30)
+    upper_bound = end_date or horizon
+
+    base = select(Post).where(Post.user_id == user.id)
+    if platform:
+        base = base.where(Post.platform == platform)
+    if status:
+        base = base.where(Post.status == status)
+    if start_date:
+        base = base.where(Post.scheduled_time >= start_date)
+    if end_date:
+        base = base.where(Post.scheduled_time <= end_date)
+
+    all_rows = (await db.execute(base.order_by(Post.scheduled_time.desc()))).scalars().all()
+
+    overview = {
+        "total": len(all_rows),
+        "pending": sum(1 for p in all_rows if p.status == Post.STATUS_PENDING),
+        "scheduled": sum(1 for p in all_rows if p.status == Post.STATUS_SCHEDULED),
+        "posted": sum(1 for p in all_rows if p.status == Post.STATUS_POSTED),
+        "failed": sum(1 for p in all_rows if p.status == Post.STATUS_FAILED),
+    }
+
+    by_platform: dict[str, int] = {}
+    for post in all_rows:
+        by_platform[post.platform] = by_platform.get(post.platform, 0) + 1
+
+    platform_usage = {
+        "total_posts_by_platform": by_platform,
+        "most_used_platform": max(by_platform.items(), key=lambda kv: kv[1])[0] if by_platform else None,
+        "most_used_platform_count": max(by_platform.values(), default=0),
+    }
+
+    upcoming_rows = [
+        p for p in all_rows
+        if p.status == Post.STATUS_PENDING and p.scheduled_time and p.scheduled_time >= now and p.scheduled_time <= horizon
+    ]
+    upcoming_by_platform: dict[str, int] = {}
+    for post in upcoming_rows:
+        upcoming_by_platform[post.platform] = upcoming_by_platform.get(post.platform, 0) + 1
+
+    recent_rows = all_rows[:5]
+    recent_posts = []
+    for post in recent_rows:
+        media_urls = [
+            f"{settings.BASE_URL}{settings.MEDIA_URL_PREFIX}/{m.file}"
+            for m in post.media_files
+        ]
+        recent_posts.append({
+            "id": post.id,
+            "caption": post.caption,
+            "platform": post.platform,
+            "status": post.status,
+            "scheduled_time": post.scheduled_time.isoformat() if post.scheduled_time else None,
+            "post_url": post.post_url,
+            "media": media_urls,
+            "day_group_id": post.day_group_id,
+        })
+
+    return {
+        "success": True,
+        "message": "Dashboard fetched successfully",
+        "data": {
+            "overview": overview,
+            "by_platform": by_platform,
+            "platform_usage": platform_usage,
+            "upcoming": {
+                "total_pending": len(upcoming_rows),
+                "by_platform": upcoming_by_platform,
+            },
+            "recent_posts": recent_posts,
+        },
+        "summary": {
+            "total": len(all_rows),
+            "pending": overview["pending"],
+            "scheduled": overview["scheduled"],
+            "posted": overview["posted"],
+            "failed": overview["failed"],
+        },
+        "pagination": {
+            "page": page,
+            "page_size": page_size,
+            "total": len(all_rows),
+            "total_pages": (len(all_rows) + page_size - 1) // page_size,
+            "has_next": page * page_size < len(all_rows),
+            "has_prev": page > 1,
+        },
+    }
+
+
 @router.get("/history/")
 async def list_posted_and_failed_posts(
     page: int = Query(1, ge=1),
