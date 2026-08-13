@@ -23,17 +23,21 @@ from src.models.accounts import User, AgentDevice
 
 router = APIRouter(prefix="/agent", tags=["agent"])
 
-# Path to the built agent exe (standalone onefile build: dist/agent.exe)
-# On Windows the build produces dist/agent.exe; on macOS/Linux it produces
-# dist/agent (no extension). We check both so the download works regardless
-# of which OS the build was run on.
+# Path to the built agent binaries stored under media/assets/agent/.
+# build_agent.bat  -> media/assets/agent/agent.exe  (Windows)
+# build_agent_mac.sh -> media/assets/agent/AutoSocialAgent.dmg + .app (macOS)
+# We also fall back to dist/ in case the assets copy step hasn't run yet.
 _EXE_CANDIDATES = [
-    BASE_DIR / "dist" / "agent.exe",   # Windows build
-    BASE_DIR / "dist" / "agent",       # macOS / Linux build
+    BASE_DIR / "media" / "assets" / "agent" / "agent.exe",   # Windows build (assets)
+    BASE_DIR / "media" / "assets" / "agent" / "agent",       # macOS / Linux (assets)
+    BASE_DIR / "dist" / "agent.exe",                         # fallback: dist
+    BASE_DIR / "dist" / "agent",                             # fallback: dist
 ]
 
 # macOS distributable installer created by build_agent_mac.sh.
 _DMG_CANDIDATES = [
+    BASE_DIR / "media" / "assets" / "agent" / "AutoSocialAgent.dmg",
+    BASE_DIR / "media" / "assets" / "agent" / "AutoSocialAgent.app",
     BASE_DIR / "dist" / "AutoSocialAgent.dmg",
     BASE_DIR / "dist" / "AutoSocialAgent.app",
 ]
@@ -69,6 +73,8 @@ async def download_agent_exe(user: User = Depends(get_current_user)):
             status_code=404,
             detail="Agent exe not found. Run build_agent.bat first to build it.",
         )
+    # Log which directory the file is being served from
+    print(f"[agent/download/] Serving: {exe_path}")
     # Use the actual filename so the download keeps the right extension
     download_name = exe_path.name
     return FileResponse(
@@ -91,8 +97,10 @@ async def download_agent_dmg(user: User = Depends(get_current_user)):
     if dmg_path is None:
         raise HTTPException(
             status_code=404,
-            detail="Mac agent DMG not found. Run ./build_agent_mac.sh first to produce dist/AutoSocialAgent.dmg.",
+            detail="Mac agent DMG not found. Run ./build_agent_mac.sh first to produce AutoSocialAgent.dmg.",
         )
+    # Log which directory the file is being served from
+    print(f"[agent/download/dmg/] Serving: {dmg_path}")
 
     download_name = dmg_path.name
     return FileResponse(

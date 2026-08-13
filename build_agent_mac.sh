@@ -86,6 +86,15 @@ if [ ! -f "$DMG_PATH" ]; then
     exit 1
 fi
 
+# ── Copy artifacts to media/assets/agent for download ───────────────
+ASSETS_DIR="media/assets/agent"
+echo "[INFO] Copying build artifacts to $ASSETS_DIR for download..."
+mkdir -p "$ASSETS_DIR"
+rm -rf "$ASSETS_DIR/AutoSocialAgent.app" "$ASSETS_DIR/AutoSocialAgent.dmg"
+cp -R "$APP_PATH" "$ASSETS_DIR/"
+cp "$DMG_PATH" "$ASSETS_DIR/"
+echo "[OK] Artifacts available for download at /media/assets/agent/"
+
 echo ""
 echo "========================================"
 echo "  Build complete!"
@@ -93,6 +102,9 @@ echo "========================================"
 echo ""
 echo "  App:    $APP_PATH"
 echo "  DMG:    $DMG_PATH"
+echo "  Download URLs (served by backend):"
+echo "    /media/assets/agent/AutoSocialAgent.dmg"
+echo "    /media/assets/agent/AutoSocialAgent.app"
 echo ""
 echo "  Note: The .dmg is unsigned. To distribute, sign it with:"
 echo "    codesign --force --deep --sign \"Developer ID Application: YOUR NAME\" \"$DMG_PATH\""
