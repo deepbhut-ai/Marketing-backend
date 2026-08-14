@@ -43,4 +43,8 @@ async def log_post_event(
         ))
         await db.flush()
     except Exception as e:
+        # Rollback so the session isn't poisoned for subsequent operations.
+        # Without this, any later DB access (e.g. lazy-loading user.id)
+        # raises PendingRollbackError and crashes the request.
+        await db.rollback()
         logger.warning("log_post_event skipped (%s): %s", action, e)
