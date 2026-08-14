@@ -1,1 +1,0 @@
-../../../Resources/selenium/webdriver/__init__.pyi

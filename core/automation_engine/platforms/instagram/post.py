@@ -1,7 +1,7 @@
 import os
 import time
 
-from selenium.webdriver.common.by import By
+from core.automation_engine.browser.browser_manager import By
 
 from core.automation_engine.common.human_behavior import small_pause, medium_pause
 from core.automation_engine.common.screenshot_helper import save_screenshot

@@ -1,8 +1,7 @@
 import os
 import time
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
+from core.automation_engine.browser.browser_manager import By, Keys
 
 from core.automation_engine.common.tab_manager import open_new_tab
 from core.automation_engine.common.wait_helper import wait_for_visible, wait_for_clickable

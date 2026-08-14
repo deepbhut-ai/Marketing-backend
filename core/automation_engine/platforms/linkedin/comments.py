@@ -7,12 +7,16 @@
 import re
 import time
 
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from core.automation_engine.browser.browser_manager import By, Keys
 
-from src.services.ai_reply import generate_ai_reply
+try:
+    from src.services.ai_reply import generate_ai_reply
+except ImportError:
+    try:
+        from core.automation_engine.common.ai_reply_stub import generate_ai_reply
+    except ImportError:
+        def generate_ai_reply(comment_text, reply_text=None):
+            return reply_text or "Thank you for your comment!"
 
 MY_PROFILE_ID = None
 PROCESSED_COMMENTS = set()
@@ -321,16 +325,28 @@ def submit_reply(driver, editor):
 
         time.sleep(2)
 
-        submit_btn = WebDriverWait(driver, 10).until(
-            EC.element_to_be_clickable((
+        # Wait for submit button to be clickable (simple polling)
+        submit_btn = None
+        end_time = time.time() + 10
+        while time.time() < end_time:
+            btns = driver.find_elements(
                 By.XPATH,
                 "//button[contains(@class,'comments-comment-box__submit-button')]"
-            ))
-        )
+            )
+            for b in btns:
+                if b.is_displayed() and b.is_enabled():
+                    submit_btn = b
+                    break
+            if submit_btn:
+                break
+            time.sleep(0.5)
+
+        if not submit_btn:
+            raise Exception("Submit button not found")
 
         # Scroll button into view
         driver.execute_script(
-            "arguments[0].scrollIntoView({block:'center'});",
+            "arguments[0].scrollIntoView({block: 'center'});",
             submit_btn
         )
 
@@ -382,9 +398,12 @@ def reply_linkedin_comment(driver, post_url, reply_text=None, author=None, comme
 
         driver.get(post_url)
 
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        # Wait for body to be present (simple polling)
+        end_time = time.time() + 30
+        while time.time() < end_time:
+            if driver.find_elements(By.TAG_NAME, "body"):
+                break
+            time.sleep(0.5)
 
         time.sleep(0.5)
 
@@ -463,9 +482,12 @@ def check_linkedin_comments(driver, post_url):
 
         driver.get(post_url)
 
-        WebDriverWait(driver, 30).until(
-            EC.presence_of_element_located((By.TAG_NAME, "body"))
-        )
+        # Wait for body to be present (simple polling)
+        end_time = time.time() + 30
+        while time.time() < end_time:
+            if driver.find_elements(By.TAG_NAME, "body"):
+                break
+            time.sleep(0.5)
 
         time.sleep(2)
 

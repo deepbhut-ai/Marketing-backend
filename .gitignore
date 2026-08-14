@@ -55,6 +55,8 @@ celerybeat.pid
 localpycs/
 warn-*.txt
 xref-*.html
+build/
+dist/
 
 # ── Local agent screenshots ──────────────────────────────────────────
 local_agent/screenshots/
