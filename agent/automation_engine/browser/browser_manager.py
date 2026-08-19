@@ -251,33 +251,30 @@ class BrowserManager:
         # the exact profile the user selected, not a generic "Default" folder.
         target_profile_path = target_user_data_dir / source_profile_name
 
-        # If Chrome is currently running, close it automatically so profile
-        # files are not locked. Locked files cause corrupted imports and
-        # Chrome crashes with "session not created: Chrome instance exited".
-        chrome_running = any(
-            p.info.get("name", "").lower() == "chrome.exe"
-            for p in psutil.process_iter(["name"])
-        )
-        if chrome_running:
-            print("\n[INFO] Google Chrome is running. Closing it to import profile safely...")
+        # If Chrome is running with the SELECTED profile, close only those
+        # processes — not ALL Chrome windows. Locked files cause corrupted
+        # imports and Chrome crashes with "session not created".
+        source_user_data_str = str(source_user_data_dir)
+        profile_pids = BrowserManager._find_chrome_processes_for_profile(source_user_data_str)
+        if profile_pids:
+            print(f"\n[INFO] Chrome is running with the selected profile ({source_profile_name}).")
+            print(f"[INFO] Closing only that Chrome instance (not all Chrome windows)...")
             for kill_attempt in range(1, 4):
-                try:
-                    subprocess.call("taskkill /F /IM chrome.exe", shell=True,
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except Exception:
-                    pass
+                for pid in profile_pids:
+                    try:
+                        subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
                 time.sleep(3)
-                # Check if Chrome is closed
-                still_running = any(
-                    p.info.get("name", "").lower() == "chrome.exe"
-                    for p in psutil.process_iter(["name"])
-                )
-                if not still_running:
-                    print("[OK] Chrome closed. Proceeding with clean import.")
+                # Check if those specific processes are closed
+                profile_pids = BrowserManager._find_chrome_processes_for_profile(source_user_data_str)
+                if not profile_pids:
+                    print("[OK] Selected profile Chrome closed. Proceeding with clean import.")
                     break
                 print(f"[WARN] Chrome still running after attempt {kill_attempt}/3. Retrying...")
             else:
-                print("[ERROR] Could not close Chrome after 3 attempts. Importing anyway.")
+                print("[ERROR] Could not close that Chrome after 3 attempts. Importing anyway.")
 
         print("\n📥 Importing selected Chrome profile...")
         print(f"   From: {source_profile_path}")
