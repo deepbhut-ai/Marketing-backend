@@ -309,6 +309,39 @@ class BrowserManager:
         except Exception as e:
             print(f"[WARN] Could not create Local State: {e}")
 
+        # Remove stale runtime/lock files from the imported profile.
+        # These are left over from the original Chrome session and cause
+        # "session not created: Chrome instance exited" because Chrome
+        # tries to reconnect to a dead DevTools port.
+        stale_files = [
+            "SingletonLock", "SingletonSocket", "SingletonCookie",
+            "DevToolsActivePort",
+        ]
+        # Clean at user_data_dir root level
+        for fname in stale_files:
+            fpath = target_user_data_dir / fname
+            if fpath.exists():
+                try:
+                    fpath.unlink()
+                except Exception:
+                    pass
+        # Clean inside the profile folder too
+        for fname in stale_files:
+            fpath = target_profile_path / fname
+            if fpath.exists():
+                try:
+                    fpath.unlink()
+                except Exception:
+                    pass
+        # Also remove the lockfile inside the profile folder
+        lockfile = target_profile_path / "lockfile"
+        if lockfile.exists():
+            try:
+                lockfile.unlink()
+            except Exception:
+                pass
+        print("[OK] Cleaned stale runtime/lock files from imported profile")
+
         print("✅ Existing Chrome profile imported successfully.")
 
         return str(target_user_data_dir), source_profile_name
