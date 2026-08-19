@@ -486,6 +486,32 @@ class BrowserManager:
 
         self._validate_profile_path()
 
+        # Always clean stale DevToolsActivePort and lock files before doing
+        # anything. These files are left behind when Chrome crashed and cause
+        # "session not created: Chrome instance exited" on the next launch.
+        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+            # Root level
+            lock_path = os.path.join(self.user_data_dir, lock)
+            if os.path.exists(lock_path):
+                try:
+                    os.remove(lock_path)
+                except Exception:
+                    pass
+            # Inside profile folder
+            lock_path = os.path.join(self.user_data_dir, self.profile_directory, lock)
+            if os.path.exists(lock_path):
+                try:
+                    os.remove(lock_path)
+                except Exception:
+                    pass
+        # Remove lockfile inside profile folder
+        lockfile_path = os.path.join(self.user_data_dir, self.profile_directory, "lockfile")
+        if os.path.exists(lockfile_path):
+            try:
+                os.remove(lockfile_path)
+            except Exception:
+                pass
+
         # If Chrome is already running on this profile, reconnect to it
         # instead of trying to launch a second instance (which would fail
         # with "Chrome instance exited" because the profile is locked).
