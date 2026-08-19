@@ -487,16 +487,42 @@ async def main():
                 # Open a fresh Chrome with the existing profile and immediately load the
                 # platform pages so the user can verify the saved logins are working.
                 try:
-                    # Clean up any leftover AutoSocial Chrome/lock files from a previous
-                    # run so we don't reconnect to a stale DevTools session.
+                    import subprocess
+                    # Kill any stale Chrome processes on the AutoSocial profile
+                    stale_pids = BrowserManager._find_chrome_processes_for_profile(user_data_dir)
+                    if stale_pids:
+                        print(f"[INFO] Closing {len(stale_pids)} stale Chrome process(es)...", flush=True)
+                        for pid in stale_pids:
+                            try:
+                                subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            except Exception:
+                                pass
+                        time.sleep(3)
+                    # Clean up lock files at BOTH root and profile folder level
                     BrowserManager.cleanup_chromedriver_only()
                     for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                        # Root level
                         lock_path = os.path.join(user_data_dir, lock)
                         if os.path.exists(lock_path):
                             try:
                                 os.remove(lock_path)
                             except Exception:
                                 pass
+                        # Inside profile folder
+                        lock_path = os.path.join(user_data_dir, profile_directory, lock)
+                        if os.path.exists(lock_path):
+                            try:
+                                os.remove(lock_path)
+                            except Exception:
+                                pass
+                    # Also remove lockfile inside profile folder
+                    lockfile_path = os.path.join(user_data_dir, profile_directory, "lockfile")
+                    if os.path.exists(lockfile_path):
+                        try:
+                            os.remove(lockfile_path)
+                        except Exception:
+                            pass
                     # Force a fresh launch instead of reconnecting to a stale session.
                     browser_manager.driver = None
                     browser_manager.start_browser()
