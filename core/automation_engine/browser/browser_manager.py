@@ -260,8 +260,49 @@ class BrowserManager:
         )
         if chrome_running:
             print("\n⚠️  WARNING: Google Chrome is currently running.")
-            print("    Some files (cookies, logins) may be locked and skipped.")
-            print("    For best results, close all Chrome windows and try again.")
+            print("    Profile files are LOCKED and cannot be copied properly.")
+            print("    The imported profile will be CORRUPTED and Chrome will crash.")
+            print()
+            print("    Options:")
+            print("      1. Close Chrome now and continue import (recommended)")
+            print("      2. Create a fresh empty profile instead (log in manually later)")
+            print("      3. Cancel")
+            while True:
+                c = input("Select option (1/2/3): ").strip()
+                if c == "1":
+                    print("[INFO] Closing Chrome...")
+                    try:
+                        subprocess.call("taskkill /F /IM chrome.exe", shell=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        time.sleep(3)
+                    except Exception:
+                        pass
+                    # Verify Chrome is closed
+                    still_running = any(
+                        p.info.get("name", "").lower() == "chrome.exe"
+                        for p in psutil.process_iter(["name"])
+                    )
+                    if still_running:
+                        print("[ERROR] Chrome is still running. Cannot import safely.")
+                        print("[INFO] Creating a fresh empty profile instead.")
+                        user_data_dir = BrowserManager.get_autosocial_profile_dir()
+                        profile_directory = "Default"
+                        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+                        return user_data_dir, profile_directory
+                    else:
+                        print("[OK] Chrome closed. Proceeding with import.")
+                        break
+                elif c == "2":
+                    print("[INFO] Creating a fresh empty profile.")
+                    user_data_dir = BrowserManager.get_autosocial_profile_dir()
+                    profile_directory = "Default"
+                    Path(user_data_dir).mkdir(parents=True, exist_ok=True)
+                    print("✅ Fresh AutoSocial Chrome profile created.")
+                    return user_data_dir, profile_directory
+                elif c == "3":
+                    raise RuntimeError("Profile import cancelled by user.")
+                else:
+                    print("Invalid choice. Enter 1, 2, or 3.")
 
         print("\n📥 Importing selected Chrome profile...")
         print(f"   From: {source_profile_path}")
@@ -505,16 +546,33 @@ class BrowserManager:
 
         options = self._build_options()
 
+        # Try different strategies on each attempt:
+        # 1: cached chromedriver + normal options
+        # 2: auto-download chromedriver (no path) + clean locks
+        # 3: auto-download chromedriver + --no-sandbox + clean locks
         max_retries = 3
         for attempt in range(1, max_retries + 1):
             try:
-                chromedriver_path = self._resolve_chromedriver_path()
-                if chromedriver_path:
-                    from selenium.webdriver.chrome.service import Service
-                    service = Service(executable_path=chromedriver_path)
-                    driver = webdriver.Chrome(service=service, options=options)
-                else:
+                if attempt == 1:
+                    # First attempt: use cached chromedriver if available
+                    chromedriver_path = self._resolve_chromedriver_path()
+                    if chromedriver_path:
+                        from selenium.webdriver.chrome.service import Service
+                        service = Service(executable_path=chromedriver_path)
+                        driver = webdriver.Chrome(service=service, options=options)
+                    else:
+                        driver = webdriver.Chrome(options=options)
+                elif attempt == 2:
+                    # Second attempt: let Selenium auto-download correct chromedriver
+                    print("[INFO] Attempt 2: auto-downloading correct ChromeDriver...")
                     driver = webdriver.Chrome(options=options)
+                else:
+                    # Third attempt: add --no-sandbox as last resort
+                    print("[INFO] Attempt 3: trying with --no-sandbox...")
+                    options = self._build_options()
+                    options.add_argument("--no-sandbox")
+                    driver = webdriver.Chrome(options=options)
+
                 driver.implicitly_wait(5)
 
                 try:
