@@ -302,9 +302,15 @@ def load_or_create_profile():
                 profile_directory = data.get("profile_directory", "Default")
                 # Never reuse the user's daily Chrome profile in automation —
                 # that causes "Chrome instance exited" when Chrome is already running.
+                # Also check that the path actually exists on THIS machine —
+                # the backend may store a path from a different OS/machine.
                 if user_data_dir and "Google\\Chrome\\User Data" not in user_data_dir:
-                    print(f"[OK] Fetched Chrome profile from DB: {user_data_dir} / {profile_directory}")
-                    return user_data_dir, profile_directory
+                    if os.path.isdir(user_data_dir):
+                        print(f"[OK] Fetched Chrome profile from DB: {user_data_dir} / {profile_directory}")
+                        return user_data_dir, profile_directory
+                    else:
+                        print(f"[WARN] DB profile path does not exist on this machine: {user_data_dir}")
+                        print("[INFO] Falling back to local saved profile.")
                 else:
                     print("[WARN] Backend returned daily Chrome profile; using dedicated automation profile instead.")
         except Exception as e:
