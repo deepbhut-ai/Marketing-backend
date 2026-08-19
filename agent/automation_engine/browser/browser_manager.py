@@ -251,58 +251,30 @@ class BrowserManager:
         # the exact profile the user selected, not a generic "Default" folder.
         target_profile_path = target_user_data_dir / source_profile_name
 
-        # Warn if Chrome is currently running — locked files (cookies, login
-        # data, passwords) won't be copied, so the imported profile may not
-        # keep the user logged in.
+        # If Chrome is currently running, close it automatically so profile
+        # files are not locked. Locked files cause corrupted imports and
+        # Chrome crashes with "session not created: Chrome instance exited".
         chrome_running = any(
             p.info.get("name", "").lower() == "chrome.exe"
             for p in psutil.process_iter(["name"])
         )
         if chrome_running:
-            print("\n⚠️  WARNING: Google Chrome is currently running.")
-            print("    Profile files are LOCKED and cannot be copied properly.")
-            print("    The imported profile will be CORRUPTED and Chrome will crash.")
-            print()
-            print("    Options:")
-            print("      1. Close Chrome now and continue import (recommended)")
-            print("      2. Create a fresh empty profile instead (log in manually later)")
-            print("      3. Cancel")
-            while True:
-                c = input("Select option (1/2/3): ").strip()
-                if c == "1":
-                    print("[INFO] Closing Chrome...")
-                    try:
-                        subprocess.call("taskkill /F /IM chrome.exe", shell=True,
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        time.sleep(3)
-                    except Exception:
-                        pass
-                    # Verify Chrome is closed
-                    still_running = any(
-                        p.info.get("name", "").lower() == "chrome.exe"
-                        for p in psutil.process_iter(["name"])
-                    )
-                    if still_running:
-                        print("[ERROR] Chrome is still running. Cannot import safely.")
-                        print("[INFO] Creating a fresh empty profile instead.")
-                        user_data_dir = BrowserManager.get_autosocial_profile_dir()
-                        profile_directory = "Default"
-                        Path(user_data_dir).mkdir(parents=True, exist_ok=True)
-                        return user_data_dir, profile_directory
-                    else:
-                        print("[OK] Chrome closed. Proceeding with import.")
-                        break
-                elif c == "2":
-                    print("[INFO] Creating a fresh empty profile.")
-                    user_data_dir = BrowserManager.get_autosocial_profile_dir()
-                    profile_directory = "Default"
-                    Path(user_data_dir).mkdir(parents=True, exist_ok=True)
-                    print("✅ Fresh AutoSocial Chrome profile created.")
-                    return user_data_dir, profile_directory
-                elif c == "3":
-                    raise RuntimeError("Profile import cancelled by user.")
-                else:
-                    print("Invalid choice. Enter 1, 2, or 3.")
+            print("\n[INFO] Google Chrome is running. Closing it to import profile safely...")
+            try:
+                subprocess.call("taskkill /F /IM chrome.exe", shell=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(3)
+            except Exception:
+                pass
+            # Verify Chrome is closed
+            still_running = any(
+                p.info.get("name", "").lower() == "chrome.exe"
+                for p in psutil.process_iter(["name"])
+            )
+            if still_running:
+                print("[WARN] Chrome is still running. Importing anyway (some files may be skipped).")
+            else:
+                print("[OK] Chrome closed. Proceeding with clean import.")
 
         print("\n📥 Importing selected Chrome profile...")
         print(f"   From: {source_profile_path}")
