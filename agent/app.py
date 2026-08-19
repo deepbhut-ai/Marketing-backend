@@ -11,7 +11,8 @@ from local_agent.agent import main
 
 if __name__ == "__main__":
     try:
-        main()
+        import asyncio
+        asyncio.run(main())
     except KeyboardInterrupt:
         print("\nAgent stopped by user.")
     except Exception as exc:

@@ -1,5 +1,5 @@
 import time
-from core.automation_engine.browser.browser_manager import By
+from selenium.webdriver.common.by import By
 
 from .selectors import (
     CREATE_POST_XPATHS,

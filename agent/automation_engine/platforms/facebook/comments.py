@@ -1,16 +1,10 @@
 import re
 import time
 
-from core.automation_engine.browser.browser_manager import By, Keys
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 
-try:
-    from src.services.ai_reply import generate_ai_reply
-except ImportError:
-    try:
-        from core.automation_engine.common.ai_reply_stub import generate_ai_reply
-    except ImportError:
-        def generate_ai_reply(comment_text, reply_text=None):
-            return reply_text or "Thank you for your comment!"
+from src.services.ai_reply import generate_ai_reply
 
 
 def remove_non_bmp_chars(text):

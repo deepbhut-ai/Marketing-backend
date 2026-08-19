@@ -1,460 +1,38 @@
 """
-Browser Manager — manages a Chrome browser instance via Playwright (CDP).
+Browser Manager — manages a Chrome Selenium WebDriver instance.
 
-Replaces the Selenium-based manager. Key advantages:
-  - Connects to an ALREADY RUNNING Chrome via Chrome DevTools Protocol (CDP)
-    on a fixed port (9222). No "Chrome instance exited" errors.
-  - No ChromeDriver needed — Playwright talks to Chrome directly.
-  - Reuses the same browser the user logged into.
+Uses a dedicated automation Chrome profile by default so that social-media
+logins are preserved between runs without conflicting with the user's daily
+Chrome session.
 
-Exposes a Selenium-compatible API so platform executors don't need
-major rewrites. The `driver` attribute is a `SeleniumCompatPage` wrapper
-around a Playwright `Page` that implements:
-  - driver.get(url)
-  - driver.current_url
-  - driver.find_element(By.XPATH, xpath) / find_elements(...)
-  - driver.execute_script(js, *args)
-  - driver.switch_to.window(handle)
-  - driver.window_handles
-  - driver.save_screenshot(path)
-  - driver.title
-  - element.click(), element.send_keys(), element.get_attribute(), etc.
+This is the full AutoSocial_AI-main version with profile import, safe copy,
+and robust startup logic.
 """
 import os
 import shutil
 import subprocess
 import sys
 import time
-import json
-import socket
 from pathlib import Path
 from typing import Optional, Tuple
 
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.common.exceptions import WebDriverException
+
 import psutil
 
-# ── Fixed CDP port for reliable reconnect ───────────────────────────
-CDP_PORT = 9222
-CDP_HOST = "127.0.0.1"
-CDP_ENDPOINT = f"http://{CDP_HOST}:{CDP_PORT}"
-
-
-# ==================================================================
-# Selenium-compatible wrappers
-# ==================================================================
-
-class By:
-    """Selenium By compatibility constants."""
-    XPATH = "xpath"
-    CSS_SELECTOR = "css selector"
-    TAG_NAME = "tag name"
-    ID = "id"
-    CLASS_NAME = "class name"
-    NAME = "name"
-    PARTIAL_LINK_TEXT = "partial link text"
-    LINK_TEXT = "link text"
-
-
-class Keys:
-    """Selenium Keys compatibility constants."""
-    ENTER = "Enter"
-    RETURN = "Enter"
-    TAB = "Tab"
-    ESCAPE = "Escape"
-    BACK_SPACE = "Backspace"
-    DELETE = "Delete"
-    SPACE = " "
-    CONTROL = "Control"
-    ALT = "Alt"
-    SHIFT = "Shift"
-    COMMAND = "Meta"
-    META = "Meta"
-    ARROW_DOWN = "ArrowDown"
-    ARROW_UP = "ArrowUp"
-    ARROW_LEFT = "ArrowLeft"
-    ARROW_RIGHT = "ArrowRight"
-    NULL = ""
-
-
-class SeleniumCompatElement:
-    """
-    Wraps a Playwright Locator to expose Selenium WebElement API.
-    """
-
-    def __init__(self, page, locator):
-        self._page = page
-        self._locator = locator
-
-    # ── Properties ──────────────────────────────────────────────────
-
-    @property
-    def text(self):
-        try:
-            return self._locator.inner_text()
-        except Exception:
-            return ""
-
-    @property
-    def tag_name(self):
-        try:
-            return self._locator.evaluate("el => el.tagName.toLowerCase()")
-        except Exception:
-            return ""
-
-    def is_displayed(self):
-        try:
-            return self._locator.is_visible()
-        except Exception:
-            return False
-
-    def is_enabled(self):
-        try:
-            return self._locator.is_enabled()
-        except Exception:
-            return False
-
-    def is_selected(self):
-        try:
-            return self._locator.is_checked()
-        except Exception:
-            return False
-
-    def get_attribute(self, name):
-        try:
-            return self._locator.get_attribute(name)
-        except Exception:
-            return None
-
-    def get_property(self, name):
-        try:
-            return self._locator.evaluate(f"el => el['{name}']")
-        except Exception:
-            return None
-
-    # ── Actions ─────────────────────────────────────────────────────
-
-    def click(self):
-        self._locator.click()
-
-    def send_keys(self, *text_args):
-        text = "".join(str(t) for t in text_args)
-        if not text:
-            return
-        # Check if this is a file input — use set_input_files for file paths
-        try:
-            is_file_input = self._locator.evaluate(
-                "el => el.tagName === 'INPUT' && el.type === 'file'"
-            )
-            if is_file_input:
-                # Multiple files separated by newline (Selenium convention)
-                files = [f for f in text.split("\n") if f.strip()]
-                if files:
-                    self._locator.set_input_files(files)
-                return
-        except Exception:
-            pass
-        # Regular text input
-        self._locator.type(text)
-
-    def clear(self):
-        try:
-            self._locator.fill("")
-        except Exception:
-            pass
-
-    def submit(self):
-        try:
-            self._locator.evaluate("el => { const form = el.closest('form'); if (form) form.submit(); }")
-        except Exception:
-            pass
-
-    # ── Find child elements (Selenium API) ──────────────────────────
-
-    def find_element(self, by=By.XPATH, value=None):
-        selector = _build_selector(by, value)
-        child = self._locator.locator(selector).first
-        return SeleniumCompatElement(self._page, child)
-
-    def find_elements(self, by=By.XPATH, value=None):
-        selector = _build_selector(by, value)
-        children = self._locator.locator(selector)
-        count = children.count()
-        return [SeleniumCompatElement(self._page, children.nth(i)) for i in range(count)]
-
-    # ── Screenshot ──────────────────────────────────────────────────
-
-    def screenshot_as_png(self):
-        try:
-            return self._locator.screenshot()
-        except Exception:
-            return None
-
-    def screenshot(self, filename):
-        try:
-            self._locator.screenshot(path=filename)
-        except Exception:
-            pass
-
-    # ── Internal access ─────────────────────────────────────────────
-
-    @property
-    def _raw(self):
-        """Access the underlying Playwright Locator for advanced use."""
-        return self._locator
-
-
-class SeleniumCompatSwitchTo:
-    """Selenium driver.switch_to compatibility."""
-
-    def __init__(self, page_wrapper):
-        self._wrapper = page_wrapper
-
-    def window(self, handle):
-        """Switch to a window/tab by handle (index in Playwright)."""
-        self._wrapper._switch_to_window(handle)
-
-    def frame(self, frame_ref):
-        """Switch to an iframe (limited support)."""
-        self._wrapper._switch_to_frame(frame_ref)
-
-    def default_content(self):
-        """Switch back to default content."""
-        self._wrapper._switch_to_default_content()
-
-
-class SeleniumCompatPage:
-    """
-    Wraps a Playwright Page to expose Selenium WebDriver API.
-
-    This is what BrowserManager.driver returns. Platform executors use
-    it exactly like a Selenium WebDriver:
-        driver.get(url)
-        driver.find_element(By.XPATH, xpath)
-        driver.execute_script(js, element)
-        driver.current_url
-        driver.switch_to.window(handle)
-    """
-
-    def __init__(self, page, context=None, playwright_browser=None):
-        self._page = page
-        self._context = context
-        self._playwright_browser = playwright_browser
-        self.switch_to = SeleniumCompatSwitchTo(self)
-
-    # ── Navigation ──────────────────────────────────────────────────
-
-    def get(self, url):
-        self._page.goto(url, wait_until="domcontentloaded")
-
-    @property
-    def current_url(self):
-        try:
-            return self._page.url
-        except Exception:
-            return ""
-
-    @property
-    def title(self):
-        try:
-            return self._page.title()
-        except Exception:
-            return ""
-
-    # ── Find elements ───────────────────────────────────────────────
-
-    def find_element(self, by=By.XPATH, value=None):
-        selector = _build_selector(by, value)
-        locator = self._page.locator(selector).first
-        return SeleniumCompatElement(self._page, locator)
-
-    def find_elements(self, by=By.XPATH, value=None):
-        selector = _build_selector(by, value)
-        loc = self._page.locator(selector)
-        count = loc.count()
-        return [SeleniumCompatElement(self._page, loc.nth(i)) for i in range(count)]
-
-    # ── JavaScript ──────────────────────────────────────────────────
-
-    def execute_script(self, script, *args):
-        """
-        Execute JavaScript. Supports Selenium's arguments[0] syntax.
-
-        If args contain SeleniumCompatElement wrappers, they are converted
-        to Playwright Locator elements before passing to evaluate.
-        """
-        # Convert SeleniumCompatElement args to Playwright locators
-        pw_args = []
-        for arg in args:
-            if isinstance(arg, SeleniumCompatElement):
-                pw_args.append(arg._raw)
-            elif isinstance(arg, (list, tuple)):
-                pw_args.append([
-                    a._raw if isinstance(a, SeleniumCompatElement) else a
-                    for a in arg
-                ])
-            else:
-                pw_args.append(arg)
-
-        # If the script uses arguments[0], we need to pass them as function args
-        if "arguments" in script:
-            func_body = script
-            param_count = len(pw_args)
-            params = ", ".join(f"a{i}" for i in range(param_count))
-            # Replace arguments[N] with aN
-            for i in range(param_count):
-                func_body = func_body.replace(f"arguments[{i}]", f"a{i}")
-            wrapper = f"({params}) => {{ {func_body} }}"
-            try:
-                return self._page.evaluate(wrapper, *pw_args)
-            except Exception:
-                # Fallback: try as raw expression
-                try:
-                    return self._page.evaluate(script, *pw_args)
-                except Exception:
-                    return None
-        else:
-            try:
-                return self._page.evaluate(script)
-            except Exception:
-                return None
-
-    # ── Screenshots ─────────────────────────────────────────────────
-
-    def save_screenshot(self, filename):
-        try:
-            self._page.screenshot(path=filename)
-        except Exception:
-            pass
-
-    # ── Window / tab management ─────────────────────────────────────
-
-    @property
-    def window_handles(self):
-        """Return list of page indices (Playwright uses pages list)."""
-        if self._context:
-            return list(range(len(self._context.pages)))
-        return [0]
-
-    def _switch_to_window(self, handle):
-        """Switch to a page by index."""
-        if self._context and isinstance(handle, int):
-            if 0 <= handle < len(self._context.pages):
-                self._page = self._context.pages[handle]
-
-    def _switch_to_frame(self, frame_ref):
-        """Switch to an iframe (limited support via frame_locator)."""
-        pass
-
-    def _switch_to_default_content(self):
-        """Switch back to default content (no-op in Playwright)."""
-        pass
-
-    # ── Misc Selenium compatibility ─────────────────────────────────
-
-    def implicitly_wait(self, seconds):
-        # Playwright uses auto-waiting; this is a no-op.
-        pass
-
-    def quit(self):
-        try:
-            if self._playwright_browser:
-                self._playwright_browser.close()
-        except Exception:
-            pass
-
-    def close(self):
-        try:
-            self._page.close()
-        except Exception:
-            pass
-
-    @property
-    def _raw_page(self):
-        """Access the underlying Playwright Page for advanced use."""
-        return self._page
-
-    @property
-    def _raw_context(self):
-        """Access the underlying Playwright BrowserContext."""
-        return self._context
-
-    def new_tab(self, url=None):
-        """Open a new tab and optionally navigate to url."""
-        if self._context:
-            new_page = self._context.new_page()
-            if url:
-                new_page.goto(url, wait_until="domcontentloaded")
-            self._page = new_page
-            return new_page
-        return None
-
-    @property
-    def current_window_handle(self):
-        """Return current page index."""
-        if self._context:
-            for i, p in enumerate(self._context.pages):
-                if p == self._page:
-                    return i
-        return 0
-
-
-# ==================================================================
-# Helper functions
-# ==================================================================
-
-def _build_selector(by: str, value: str) -> str:
-    """Convert Selenium (By, value) to a Playwright selector string."""
-    if by == By.XPATH:
-        return f"xpath={value}"
-    elif by == By.CSS_SELECTOR:
-        return value
-    elif by == By.TAG_NAME:
-        return value
-    elif by == By.ID:
-        return f"#{value}"
-    elif by == By.CLASS_NAME:
-        return f".{value.replace(' ', '.')}"
-    elif by == By.NAME:
-        return f"[name=\"{value}\"]"
-    elif by == By.LINK_TEXT:
-        return f"text={value}"
-    elif by == By.PARTIAL_LINK_TEXT:
-        return f"text={value}"
-    else:
-        return value
-
-
-def _is_port_in_use(port: int) -> bool:
-    """Check if a TCP port is in use (Chrome is listening on it)."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.settimeout(1)
-        return s.connect_ex((CDP_HOST, port)) == 0
-
-
-def _is_cdp_alive(port: int = CDP_PORT) -> bool:
-    """Check if Chrome DevTools Protocol is responding on the given port."""
-    try:
-        import urllib.request
-        url = f"http://{CDP_HOST}:{port}/json/version"
-        with urllib.request.urlopen(url, timeout=2) as resp:
-            data = json.loads(resp.read())
-            return "webSocketDebuggerUrl" in data
-    except Exception:
-        return False
-
-
-# ==================================================================
-# BrowserManager
-# ==================================================================
 
 class BrowserManager:
     """
-    Chrome manager for AutoSocial AI using Playwright (CDP).
+    Chrome manager for AutoSocial AI.
 
     Goal:
-    - Connect to an already-running Chrome on port 9222 if available.
-    - If not, launch Chrome with the user's profile + --remote-debugging-port=9222.
-    - No ChromeDriver needed. No "Chrome instance exited" errors.
-    - Exposes a Selenium-compatible API via SeleniumCompatPage.
+    - Do NOT close user's normal Chrome windows.
+    - Use dedicated AutoSocial Chrome profile.
+    - If user selects existing Chrome profile, copy/import it safely.
+    - Selenium opens only AutoSocial Chrome profile.
     """
 
     def __init__(
@@ -468,10 +46,7 @@ class BrowserManager:
         self.profile_directory = profile_directory
         self.detach = detach
         self.headless = headless
-        self.driver = None  # SeleniumCompatPage instance
-        self._playwright = None
-        self._browser = None  # Playwright Browser (CDP connection)
-        self._context = None  # Playwright BrowserContext
+        self.driver = None
 
     # --------------------------------------------------
     # Paths
@@ -507,19 +82,31 @@ class BrowserManager:
     @staticmethod
     def cleanup_chromedriver_only() -> None:
         """
-        Kill leftover chromedriver processes (compatibility name).
-        With Playwright there's no chromedriver, but we kill stale
-        Chrome processes on the CDP port if needed.
+        Safe cleanup:
+        - Kill only chromedriver (not chrome)
         """
-        # No chromedriver to kill with Playwright.
-        # This is kept for API compatibility with task_runner.py
-        pass
+        if sys.platform == "win32":
+            subprocess.call(
+                "taskkill /F /IM chromedriver.exe",
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        else:
+            subprocess.call(
+                "pkill -f chromedriver",
+                shell=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        time.sleep(1)
 
     @staticmethod
     def _find_chrome_processes_for_profile(user_data_dir: str) -> list[int]:
         """
         Return PIDs of chrome processes whose command line includes the
-        given user-data-dir.
+        given user-data-dir. These are the automation/profile Chrome instances
+        we own and may reconnect to or close safely.
         """
         chrome_name = "chrome.exe" if sys.platform == "win32" else "chrome"
         pids: list[int] = []
@@ -550,6 +137,7 @@ class BrowserManager:
         if not prefs_file.exists():
             return ""
         try:
+            import json
             with open(prefs_file, "r", encoding="utf-8") as f:
                 prefs = json.load(f)
             profile_name = (
@@ -595,6 +183,9 @@ class BrowserManager:
     def _safe_copy_profile_folder(source: Path, target: Path) -> None:
         """
         Copy selected Chrome profile without closing user's Chrome.
+
+        Some files may be locked if Chrome is open.
+        We skip locked/cache files instead of killing Chrome.
         """
 
         ignore_names = {
@@ -656,8 +247,13 @@ class BrowserManager:
             )
 
         target_user_data_dir = Path(BrowserManager.get_autosocial_profile_dir())
+        # Preserve the original profile folder name so the agent always uses
+        # the exact profile the user selected, not a generic "Default" folder.
         target_profile_path = target_user_data_dir / source_profile_name
 
+        # Warn if Chrome is currently running — locked files (cookies, login
+        # data, passwords) won't be copied, so the imported profile may not
+        # keep the user logged in.
         chrome_running = any(
             p.info.get("name", "").lower() == "chrome.exe"
             for p in psutil.process_iter(["name"])
@@ -676,8 +272,12 @@ class BrowserManager:
             target=target_profile_path,
         )
 
+        # Do NOT copy the original Local State file — it contains absolute
+        # paths and profile names from the original Chrome User Data dir.
+        # Instead, create a minimal Local State for this standalone profile dir.
         local_state_file = target_user_data_dir / "Local State"
         try:
+            import json
             local_state = {
                 "profile": {
                     "info_cache": {
@@ -750,35 +350,117 @@ class BrowserManager:
         return user_data_dir, profile_directory
 
     # --------------------------------------------------
-    # Profile path validation
+    # Chrome options
     # --------------------------------------------------
 
     def _validate_profile_path(self) -> None:
         Path(self.user_data_dir).mkdir(parents=True, exist_ok=True)
 
+    def _build_options(self, debugging_address: Optional[str] = None) -> Options:
+        options = Options()
+
+        if debugging_address:
+            # Connect to an already-running Chrome instead of launching a new one.
+            # When using debuggerAddress, ChromeDriver controls an existing browser
+            # and will reject most launch-only options, so keep the options minimal.
+            options.add_experimental_option("debuggerAddress", debugging_address)
+            return options
+
+        options.add_argument(f"--user-data-dir={self.user_data_dir}")
+        options.add_argument(f"--profile-directory={self.profile_directory}")
+
+        options.add_argument("--start-maximized")
+        options.add_argument("--disable-notifications")
+        options.add_argument("--disable-popup-blocking")
+        options.add_argument("--no-first-run")
+        options.add_argument("--no-default-browser-check")
+        options.add_argument("--disable-background-mode")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_argument("--remote-debugging-port=0")
+        if sys.platform == "darwin":
+            options.add_argument(
+                "user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        else:
+            options.add_argument(
+                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+
+        options.add_experimental_option("detach", self.detach)
+        options.add_experimental_option("useAutomationExtension", False)
+        options.add_experimental_option(
+            "excludeSwitches",
+            ["enable-automation", "enable-logging"],
+        )
+
+        options.add_argument("--log-level=3")
+        options.add_argument("--disable-logging")
+
+        if self.headless:
+            options.add_argument("--headless=new")
+
+        return options
+
+    def _read_profile_debugging_port(self) -> Optional[str]:
+        """
+        If Chrome is already running on this profile, Selenium wrote a
+        DevToolsActivePort file containing the port. Read it so we can
+        reconnect to the existing browser instead of launching a second
+        instance on the locked profile.
+        """
+        port_file = Path(self.user_data_dir) / "DevToolsActivePort"
+        if not port_file.exists():
+            return None
+        try:
+            lines = port_file.read_text(encoding="utf-8").strip().splitlines()
+            if lines:
+                port = lines[0].strip()
+                if port.isdigit():
+                    return f"127.0.0.1:{port}"
+        except Exception:
+            pass
+        return None
+
     # --------------------------------------------------
     # Start browser
     # --------------------------------------------------
 
-    def start_browser(self) -> SeleniumCompatPage:
-        """
-        Start or connect to Chrome via Playwright CDP.
-
-        Strategy:
-        1. If CDP is alive on port 9222 → connect to existing Chrome.
-        2. If not → launch Chrome with --remote-debugging-port=9222.
-        3. Return a SeleniumCompatPage wrapper.
-        """
+    def start_browser(self) -> WebDriver:
         if self.driver is not None:
             try:
-                _ = self.driver.current_url
+                _ = self.driver.current_window_handle
                 return self.driver
             except Exception:
                 self.driver = None
 
         self._validate_profile_path()
 
-        # Remove stale lock files
+        # If Chrome is already running on this profile, reconnect to it
+        # instead of trying to launch a second instance (which would fail
+        # with "Chrome instance exited" because the profile is locked).
+        debugging_address = self._read_profile_debugging_port()
+        if debugging_address and self._is_profile_chrome_running(self.user_data_dir):
+            print(f"[INFO] Reusing existing AutoSocial Chrome on {debugging_address}")
+            options = self._build_options(debugging_address=debugging_address)
+            try:
+                from selenium.webdriver.chrome.service import Service
+                service = Service(executable_path=self._resolve_chromedriver_path())
+                driver = webdriver.Chrome(service=service, options=options)
+                driver.implicitly_wait(5)
+                print("✅ Reconnected to existing AutoSocial Chrome")
+                self.driver = driver
+                return driver
+            except Exception as exc:
+                print(f"[WARN] Could not reconnect to existing Chrome: {exc}")
+                # Fall through to a fresh launch after cleaning locks.
+
+        # Remove stale lock files that prevent Chrome from starting.
+        # These are left behind when Chrome was closed improperly.
         for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
             lock_path = os.path.join(self.user_data_dir, lock)
             if os.path.exists(lock_path):
@@ -787,31 +469,28 @@ class BrowserManager:
                 except Exception:
                     pass
 
-        from playwright.sync_api import sync_playwright
+        # Kill leftover chromedriver processes.
+        BrowserManager.cleanup_chromedriver_only()
 
-        self._playwright = sync_playwright().start()
-
-        # ── Strategy 1: Connect to already-running Chrome on CDP port ──
-        if _is_cdp_alive(CDP_PORT):
-            print(f"[INFO] Found Chrome on CDP port {CDP_PORT}, connecting...")
-            try:
-                self._browser = self._playwright.chromium.connect_over_cdp(CDP_ENDPOINT)
-                self._context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
-                page = self._context.pages[0] if self._context.pages else self._context.new_page()
-                self.driver = SeleniumCompatPage(page, self._context, self._browser)
-                print("✅ Reconnected to existing Chrome via CDP")
-                print(f"📁 Profile path: {self.user_data_dir}")
-                print(f"👤 Profile directory: {self.profile_directory}")
-                return self.driver
-            except Exception as exc:
-                print(f"[WARN] CDP connect failed: {exc}")
-                # Fall through to launch
-
-        # ── Strategy 2: Launch fresh Chrome with CDP port ──
-        # Kill stale Chrome processes on this profile
+        # If an AutoSocial Chrome is already running on this profile, it is
+        # likely a stale/orphaned process from a previous crash. Close it
+        # gracefully first so the fresh launch below can claim the profile.
         profile_pids = BrowserManager._find_chrome_processes_for_profile(self.user_data_dir)
         if profile_pids:
-            print(f"[WARN] Found {len(profile_pids)} stale Chrome process(es); closing...")
+            print(f"[WARN] Found {len(profile_pids)} stale AutoSocial Chrome process(es); closing...")
+            for pid in profile_pids:
+                try:
+                    subprocess.call(
+                        f"taskkill /PID {pid}",
+                        shell=True,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                except Exception:
+                    pass
+            time.sleep(3)
+            # Force-kill any survivors.
+            profile_pids = BrowserManager._find_chrome_processes_for_profile(self.user_data_dir)
             for pid in profile_pids:
                 try:
                     subprocess.call(
@@ -824,89 +503,68 @@ class BrowserManager:
                     pass
             time.sleep(2)
 
-        # Remove lock files again after killing stale processes
-        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
-            lock_path = os.path.join(self.user_data_dir, lock)
-            if os.path.exists(lock_path):
-                try:
-                    os.remove(lock_path)
-                except Exception:
-                    pass
-
-        print(f"[INFO] Launching Chrome with CDP port {CDP_PORT}...")
-
-        # NOTE: --user-data-dir and --profile-directory are NOT passed as args
-        # because launch_persistent_context already handles them via the
-        # user_data_dir parameter. Passing them as args causes Playwright to
-        # raise "Pass user_data_dir parameter instead of specifying --user-data-dir".
-        launch_args = [
-            f"--remote-debugging-port={CDP_PORT}",
-            "--start-maximized",
-            "--disable-notifications",
-            "--disable-popup-blocking",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--disable-background-mode",
-            "--disable-blink-features=AutomationControlled",
-        ]
-
-        if self.headless:
-            launch_args.append("--headless=new")
+        options = self._build_options()
 
         try:
-            self._browser = self._playwright.chromium.launch_persistent_context(
-                user_data_dir=self.user_data_dir,
-                headless=self.headless,
-                args=launch_args,
-                channel="chrome",
-                no_viewport=True,
-                ignore_default_args=["--enable-automation"],
-            )
-            self._context = self._browser
-            page = self._context.pages[0] if self._context.pages else self._context.new_page()
+            chromedriver_path = self._resolve_chromedriver_path()
+            if chromedriver_path:
+                from selenium.webdriver.chrome.service import Service
+                service = Service(executable_path=chromedriver_path)
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                driver = webdriver.Chrome(options=options)
+            driver.implicitly_wait(5)
 
-            # Hide webdriver flag
             try:
-                page.add_init_script(
+                driver.execute_script(
                     "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
                 )
             except Exception:
                 pass
 
-            self.driver = SeleniumCompatPage(page, self._context, self._browser)
             print("✅ AutoSocial Chrome opened successfully")
             print(f"📁 Profile path: {self.user_data_dir}")
             print(f"👤 Profile directory: {self.profile_directory}")
-            print(f"🔌 CDP port: {CDP_PORT}")
-            return self.driver
 
-        except Exception as exc:
-            # Fallback: try launching with Playwright's bundled Chromium
-            print(f"[WARN] Chrome launch failed ({exc}), trying Playwright Chromium...")
-            try:
-                self._browser = self._playwright.chromium.launch_persistent_context(
-                    user_data_dir=self.user_data_dir,
-                    headless=self.headless,
-                    args=launch_args,
-                    no_viewport=True,
-                    ignore_default_args=["--enable-automation"],
-                )
-                self._context = self._browser
-                page = self._context.pages[0] if self._context.pages else self._context.new_page()
-                self.driver = SeleniumCompatPage(page, self._context, self._browser)
-                print("✅ AutoSocial Chrome opened (Playwright Chromium)")
-                print(f"📁 Profile path: {self.user_data_dir}")
-                print(f"👤 Profile directory: {self.profile_directory}")
-                return self.driver
-            except Exception as exc2:
-                raise RuntimeError(
-                    "Failed to start Chrome browser.\n"
-                    "Possible reasons:\n"
-                    "1. Chrome is already open with same profile\n"
-                    "2. Profile path is corrupted\n"
-                    "3. Playwright Chromium not installed\n\n"
-                    f"Original error: {exc2}"
-                )
+            self.driver = driver
+            return driver
+
+        except WebDriverException as exc:
+            raise RuntimeError(
+                "Failed to start Chrome browser.\n"
+                "Possible reasons:\n"
+                "1. AutoSocial Chrome is already open with same profile\n"
+                "2. Profile path is corrupted\n"
+                "3. ChromeDriver version issue\n\n"
+                "Important: This code does NOT close user's normal Chrome windows.\n"
+                "Please close only AutoSocial Chrome if it is already open.\n\n"
+                f"Original error: {exc}"
+            )
+
+    @staticmethod
+    def _resolve_chromedriver_path() -> Optional[str]:
+        """
+        Find the newest chromedriver in the Selenium cache.
+        In a frozen PyInstaller exe, Selenium Manager may fail to auto-download,
+        so using an existing cached driver is more reliable.
+        """
+        try:
+            import glob
+            cache_base = os.path.join(
+                os.path.expanduser("~"), ".cache", "selenium", "chromedriver"
+            )
+            if sys.platform == "darwin":
+                arch = "mac64" if os.uname().machine == "x86_64" else "mac-arm64"
+                pattern = os.path.join(cache_base, arch, "*", "chromedriver")
+            else:
+                pattern = os.path.join(cache_base, "win64", "*", "chromedriver.exe")
+            candidates = glob.glob(pattern)
+            if candidates:
+                # Sort by version folder name (semantic-ish) descending.
+                return sorted(candidates, reverse=True)[0]
+        except Exception:
+            pass
+        return None
 
     # --------------------------------------------------
     # Close browser
@@ -916,28 +574,20 @@ class BrowserManager:
         """
         Close the current browser session and clear the driver instance.
         """
-        if self._context:
+        if self.driver:
             try:
-                self._context.close()
+                self.driver.quit()
                 print("✅ AutoSocial Chrome closed successfully")
             except Exception as e:
                 print(f"⚠️ Error closing Chrome: {e}")
             finally:
                 self.driver = None
-                self._context = None
-                self._browser = None
-
-        if self._playwright:
-            try:
-                self._playwright.stop()
-            except Exception:
-                pass
-            finally:
-                self._playwright = None
 
     @staticmethod
-    def force_close_driver(driver) -> None:
-        """Static helper to close a specific driver if needed."""
+    def force_close_driver(driver: Optional[WebDriver]) -> None:
+        """
+        Static helper to close a specific driver instance if needed.
+        """
         if driver:
             try:
                 driver.quit()
@@ -945,9 +595,9 @@ class BrowserManager:
                 pass
 
     # --------------------------------------------------
-    # Aliases for compatibility with task_runner
+    # Aliases for compatibility with Marketing-backend task_runner
     # --------------------------------------------------
-    def start(self) -> SeleniumCompatPage:
+    def start(self) -> WebDriver:
         """Alias for start_browser()."""
         return self.start_browser()
 

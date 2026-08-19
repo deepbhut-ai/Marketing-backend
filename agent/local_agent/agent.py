@@ -230,7 +230,8 @@ def open_platform_login_pages(browser_manager):
 
         # Open the rest as real tabs in the same browser session.
         for url in urls[1:]:
-            driver.new_tab(url)
+            driver.switch_to.new_window("tab")
+            driver.get(url)
             time.sleep(1)
     except Exception as e:
         print(f"[WARN] Error opening platform tabs: {e}", flush=True)
@@ -402,141 +403,64 @@ def download_media_to_temp(media_list):
 # ===============================
 # 🔌 MAIN LOOP
 # ===============================
-#
-# Playwright's sync API cannot run when there's an asyncio event loop
-# anywhere in the current thread context — even if the loop is NOT running.
-# Python's asyncio infrastructure may leave a loop set as the "current event
-# loop" even after asyncio.run() returns, or from other asyncio imports.
-#
-# Solution: Run ALL Playwright/browser operations in a DEDICATED THREAD
-# that has asyncio.set_event_loop(None) — no loop at all. The WebSocket
-# loop runs in a SEPARATE thread with its own asyncio loop. Communication
-# between them uses a simple queue + threading.Event pattern.
+async def main():
+    print("=" * 50, flush=True)
+    print("  AutoSocial AI Agent", flush=True)
+    print("=" * 50, flush=True)
 
-import threading
-import queue as _queue
+    # ── Step 1: Get agent token ──────────────────────────
+    print("\n[Step 1/5] Authentication", flush=True)
+    agent_token = get_agent_token()
+    print("[OK] Token acquired\n", flush=True)
 
-# ── Browser worker thread ──────────────────────────────────────────
-# A single dedicated thread that runs ALL Playwright operations.
-# It has NO asyncio event loop, so Playwright sync API works.
-# The main thread and WebSocket thread submit work to it via a queue.
+    # ── Step 2: Load Chrome profile ──────────────────────
+    print("[Step 2/5] Chrome Profile Setup", flush=True)
+    user_data_dir, profile_directory = load_or_create_profile()
+    print(f"[OK] Profile: {user_data_dir} / {profile_directory}\n", flush=True)
 
-_browser_work_queue = _queue.Queue()
-_browser_result_queue = _queue.Queue()
-_browser_ready = threading.Event()
-_browser_thread = None
+    browser_manager = BrowserManager(
+        user_data_dir=user_data_dir,
+        profile_directory=profile_directory,
+        detach=True,
+        headless=False,
+    )
 
-
-def _browser_worker():
-    """
-    Dedicated browser worker thread.
-    Runs ALL Playwright operations. Has NO asyncio event loop.
-    Receives work items from _browser_work_queue and sends results back
-    via _browser_result_queue.
-    """
-    # CRITICAL: Ensure no asyncio loop is set in this thread.
-    asyncio.set_event_loop(None)
-
-    # Note: Playwright's _context_manager.py has been patched directly in
-    # the venv to always create a fresh event loop instead of checking for
-    # a running one. This patch is bundled by PyInstaller into the exe.
-    # No runtime monkey-patching needed.
-
-    browser_manager = None
-    agent_token = None
-
-    while True:
-        item = _browser_work_queue.get()
-        if item is None:
-            # Shutdown signal
-            break
-
-        action = item.get("action")
-
-        try:
-            if action == "setup":
-                # Steps 1-4: Full browser setup
-                agent_token = item["agent_token"]
-                user_data_dir = item["user_data_dir"]
-                profile_directory = item["profile_directory"]
-
-                browser_manager = BrowserManager(
-                    user_data_dir=user_data_dir,
-                    profile_directory=profile_directory,
-                    detach=True,
-                    headless=False,
-                )
-
-                # Step 3: Platform login
-                _do_platform_login(browser_manager, user_data_dir, profile_directory)
-
-                # Step 4: Ensure Chrome is ready
-                _ensure_chrome_ready(browser_manager)
-
-                _browser_result_queue.put({"success": True})
-                _browser_ready.set()
-
-            elif action == "start_browser":
-                if browser_manager:
-                    browser_manager.start_browser()
-                _browser_result_queue.put({"success": True})
-
-            elif action == "run_task":
-                post_id = item["post_id"]
-                platform = item["platform"]
-                caption = item["caption"]
-                media = item["media"]
-
-                # Ensure Chrome is running
-                try:
-                    browser_manager.start_browser()
-                except Exception:
-                    pass
-
-                result = run_task_verbose(
-                    post_id, platform, caption, media, browser_manager
-                )
-                _browser_result_queue.put({"success": True, "result": result})
-
-            elif action == "open_login_pages":
-                if browser_manager:
-                    open_platform_login_pages(browser_manager)
-                _browser_result_queue.put({"success": True})
-
-            else:
-                _browser_result_queue.put({"success": False, "error": f"Unknown action: {action}"})
-
-        except Exception as e:
-            _browser_result_queue.put({"success": False, "error": str(e)})
-
-
-def _submit_browser_work(item, timeout=300):
-    """Submit work to the browser thread and wait for the result."""
-    _browser_work_queue.put(item)
-    return _browser_result_queue.get(timeout=timeout)
-
-
-def _do_platform_login(browser_manager, user_data_dir, profile_directory):
-    """Step 3: Platform login (runs in browser thread)."""
+    # ── Step 3: Platform login ────────────────────────
+    # Open Chrome with social platform login pages so the user can log in.
+    # Uses the SAME BrowserManager instance so the automation Chrome is the
+    # same browser the user logs into.
     print("[Step 3/5] Platform Login", flush=True)
     profile_preferences = os.path.join(user_data_dir, profile_directory, "Preferences")
     has_existing_profile = os.path.exists(profile_preferences)
 
+    # Track whether Step 3 already opened Chrome so Step 4 doesn't try to
+    # reconnect/relaunch and accidentally close the login browser.
     chrome_opened_in_step3 = False
 
+    # Only skip the login prompt when the agent was auto-started by the backend
+    # and the user is not running it interactively. For a local/manual run, we
+    # still open the platform login pages so the user can sign in or re-login.
+    # Backend auto-start sets AGENT_TOKEN but NOT AGENT_TOKEN_FROM_CONFIG.
     is_auto_start = os.getenv("AGENT_TOKEN") and not os.getenv("AGENT_TOKEN_FROM_CONFIG")
 
     if has_existing_profile and is_auto_start and not os.getenv("AGENT_TOKEN_FROM_CONFIG"):
+        # Auto-start mode with existing profile — skip login prompt to avoid
+        # interrupting the backend-managed startup flow.
         print("[OK] Chrome profile already has saved logins. Skipping.", flush=True)
         print("[INFO] To re-login, delete the profile folder and run again.\n", flush=True)
     else:
+        # Interactive mode or fresh profile — open login pages
         if has_existing_profile:
             print("[INFO] Chrome profile exists. You can re-login or skip.", flush=True)
             print("  1. Open platform login pages (re-login)", flush=True)
             print("  2. Open Chrome with existing logins", flush=True)
             choice = input("Select option (1/2): ").strip()
             if choice == "2":
+                # Open a fresh Chrome with the existing profile and immediately load the
+                # platform pages so the user can verify the saved logins are working.
                 try:
+                    # Clean up any leftover AutoSocial Chrome/lock files from a previous
+                    # run so we don't reconnect to a stale DevTools session.
                     BrowserManager.cleanup_chromedriver_only()
                     for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
                         lock_path = os.path.join(user_data_dir, lock)
@@ -545,6 +469,7 @@ def _do_platform_login(browser_manager, user_data_dir, profile_directory):
                                 os.remove(lock_path)
                             except Exception:
                                 pass
+                    # Force a fresh launch instead of reconnecting to a stale session.
                     browser_manager.driver = None
                     browser_manager.start_browser()
                     open_platform_login_pages(browser_manager)
@@ -568,15 +493,12 @@ def _do_platform_login(browser_manager, user_data_dir, profile_directory):
             chrome_opened_in_step3 = True
             print("[OK] Platform logins done.\n", flush=True)
 
-    # Store for Step 4
-    _do_platform_login.chrome_opened = chrome_opened_in_step3
-
-
-def _ensure_chrome_ready(browser_manager):
-    """Step 4: Ensure Chrome is ready (runs in browser thread)."""
+    # ── Step 4: Ensure automation Chrome is ready ──────
     print("[Step 4/5] Starting Chrome", flush=True)
     try:
-        if getattr(_do_platform_login, 'chrome_opened', False):
+        if chrome_opened_in_step3:
+            # Step 3 already opened Chrome. Just verify the driver is still alive
+            # instead of calling start_browser() again (which can close/relaunch).
             driver = browser_manager.driver
             if driver is None:
                 raise RuntimeError("Chrome was not opened in Step 3")
@@ -589,14 +511,7 @@ def _ensure_chrome_ready(browser_manager):
         print(f"[ERROR] Chrome failed: {e}", flush=True)
         print("[INFO] Will retry when a task arrives.\n", flush=True)
 
-
-async def _websocket_loop(agent_token, browser_manager):
-    """
-    Step 5: WebSocket connection loop (runs in a separate thread with its
-    own asyncio loop). Browser operations are dispatched to the browser
-    worker thread via the queue — NOT via asyncio.to_thread (which would
-    run in a thread pool worker that might still have asyncio context).
-    """
+    # ── Step 5: Connect to backend ───────────────────────
     print("[Step 5/5] Connecting to backend", flush=True)
     server_url = os.getenv("AGENT_WS_URL", DEFAULT_WS_URL)
     if not server_url.endswith("?") and "?" not in server_url:
@@ -641,29 +556,22 @@ async def _websocket_loop(agent_token, browser_manager):
                     # Download media URLs to local temp files
                     media = download_media_to_temp(media)
 
+                    # Ensure Chrome is running
+                    try:
+                        browser_manager.start_browser()
+                    except Exception:
+                        pass  # already running is fine
+
                     print("[TASK] Running automation...")
                     try:
-                        # Dispatch to the browser worker thread via queue.
-                        # The browser thread has NO asyncio loop, so Playwright
-                        # sync API works there. We use asyncio.to_thread just
-                        # to wait for the queue result without blocking the
-                        # asyncio loop.
-                        def _submit_and_wait():
-                            _browser_work_queue.put({
-                                "action": "run_task",
-                                "post_id": post_id,
-                                "platform": platform,
-                                "caption": caption,
-                                "media": media,
-                            })
-                            return _browser_result_queue.get(timeout=600)
-
-                        response = await asyncio.to_thread(_submit_and_wait)
-
-                        if response.get("success"):
-                            result = response.get("result", {})
-                        else:
-                            result = {"success": False, "message": response.get("error", "Unknown error")}
+                        result = await asyncio.to_thread(
+                            run_task_verbose,
+                            post_id,
+                            platform,
+                            caption,
+                            media,
+                            browser_manager,
+                        )
 
                         await websocket.send(json.dumps({
                             "type": "task_result",
@@ -706,90 +614,13 @@ async def _websocket_loop(agent_token, browser_manager):
                 break
 
 
-def _run_websocket_thread(agent_token, browser_manager):
-    """
-    Run the WebSocket loop in a dedicated thread with its own asyncio loop.
-    This keeps the main thread free of asyncio so Playwright sync API works.
-    """
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        loop.run_until_complete(_websocket_loop(agent_token, browser_manager))
-    except KeyboardInterrupt:
-        print("\nAgent stopped by user.", flush=True)
-    except Exception as e:
-        print(f"\n[FATAL] WebSocket thread crashed: {e}", flush=True)
-    finally:
-        loop.close()
-
-
-def main():
-    """
-    Main entry point — runs synchronously (no asyncio in main thread).
-
-    Steps 1-2: Auth + profile selection (synchronous, no browser).
-    Steps 3-4: Browser setup (runs in dedicated browser thread, no asyncio).
-    Step 5: WebSocket loop (runs in a separate thread with its own asyncio loop).
-    """
-    print("=" * 50, flush=True)
-    print("  AutoSocial AI Agent", flush=True)
-    print("=" * 50, flush=True)
-
-    # ── Step 1: Get agent token (synchronous, no browser) ─────────
-    print("\n[Step 1/5] Authentication", flush=True)
-    agent_token = get_agent_token()
-    print("[OK] Token acquired\n", flush=True)
-
-    # ── Step 2: Load Chrome profile (synchronous, no browser) ──────
-    print("[Step 2/5] Chrome Profile Setup", flush=True)
-    user_data_dir, profile_directory = load_or_create_profile()
-    print(f"[OK] Profile: {user_data_dir} / {profile_directory}\n", flush=True)
-
-    # ── Start the dedicated browser worker thread ──────────────────
-    # This thread has NO asyncio event loop, so Playwright sync API works.
-    global _browser_thread
-    _browser_thread = threading.Thread(target=_browser_worker, daemon=True)
-    _browser_thread.start()
-
-    # ── Steps 3-4: Browser setup (in browser thread) ───────────────
-    # Submit the setup work to the browser thread and wait for it.
-    # The browser thread handles all Playwright operations.
-    result = _submit_browser_work({
-        "action": "setup",
-        "agent_token": agent_token,
-        "user_data_dir": user_data_dir,
-        "profile_directory": profile_directory,
-    }, timeout=600)
-
-    if not result.get("success"):
-        print(f"[FATAL] Browser setup failed: {result.get('error')}", flush=True)
-        input("\nPress ENTER to exit...")
-        return
-
-    # ── Step 5: Run the WebSocket loop in a separate thread ────────
-    # That thread gets its own asyncio loop for websockets.
-    # Browser operations are dispatched to the browser worker thread.
-    ws_thread = threading.Thread(
-        target=_run_websocket_thread,
-        args=(agent_token, None),  # browser_manager is in the worker thread
-        daemon=True,
-    )
-    ws_thread.start()
-
-    # Keep the main thread alive — if it exits, daemon threads are killed.
-    try:
-        ws_thread.join()
-    except KeyboardInterrupt:
-        print("\nAgent stopped by user.", flush=True)
-        # Signal the browser thread to shut down
-        _browser_work_queue.put(None)
-
-
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         log("\nAgent stopped by user.")
+    except asyncio.CancelledError:
+        log("\nAgent cancelled.")
     except Exception as e:
         import traceback
         log(f"\n[FATAL] Agent crashed: {e}")

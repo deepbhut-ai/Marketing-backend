@@ -1,5 +1,7 @@
 import time
-from core.automation_engine.browser.browser_manager import By
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 from .selectors import (
     START_POST_XPATHS,

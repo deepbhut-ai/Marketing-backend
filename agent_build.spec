@@ -29,25 +29,25 @@ block_cipher = None
 PROJECT_ROOT = os.path.abspath(SPECPATH)
 
 # ── Hidden imports ──────────────────────────────────────────────────
-# Playwright replaces Selenium — no ChromeDriver needed.
 hiddenimports = [
-    "playwright",
-    "playwright.sync_api",
-    "playwright.async_api",
-    "playwright._impl",
+    "selenium",
+    "selenium.webdriver",
+    "selenium.webdriver.chrome",
+    "selenium.webdriver.chrome.service",
+    "selenium.webdriver.chrome.options",
     "urllib3",
     "requests",
     "websockets",
     "PIL",
     "win32clipboard",
     "pywinauto",
-    "psutil",
 ]
 
-# Collect all Playwright submodules so PyInstaller bundles them.
-hiddenimports += collect_submodules("playwright")
+# Collect all submodules from packages that PyInstaller might miss
+hiddenimports += collect_submodules("selenium")
 
 # Only include the pywinauto Windows modules actually used by the upload helper.
+# collect_submodules("pywinauto") pulls in Linux test suites and loops forever.
 hiddenimports += [
     "pywinauto",
     "pywinauto.findwindows",
@@ -59,54 +59,24 @@ hiddenimports += [
     "pywinauto.controls.hwndwrapper",
 ]
 
+# Selenium Manager — needed to auto-download chromedriver in frozen exe
+hiddenimports += collect_submodules("selenium.webdriver.common.selenium_manager")
+hiddenimports += collect_submodules("selenium.webdriver.chrome.service")
+
 # ── Collect automation engine ──────────────────────────────────────
+# The automation engine code imports modules as `core.automation_engine...`.
+# The real package lives at `core/automation_engine/` (with proper __init__.py
+# files). Collect all submodules so PyInstaller bundles them.
+# In dev mode, agent.py creates a runtime alias `core -> agent/` so the code
+# under `agent/automation_engine/` is used. In the frozen exe we use the real
+# `core` package directly (no alias needed).
 hiddenimports += collect_submodules("core.automation_engine")
 
-# ── Playwright data files (browser binaries, driver) ───────────────
-# Playwright stores browser binaries in its own package directory.
-# We need to bundle them so the exe can launch Chrome without a separate
-# `playwright install` step on the target machine.
-playwright_datas = collect_data_files("playwright", include_py_files=False)
-datas = playwright_datas
-
-# Also try to find and bundle the Playwright driver (node.js binary).
-# This is what actually communicates with Chrome via CDP.
-try:
-    import playwright
-    pw_dir = os.path.dirname(playwright.__file__)
-    driver_dir = os.path.join(pw_dir, "driver")
-    if os.path.isdir(driver_dir):
-        for item in os.listdir(driver_dir):
-            item_path = os.path.join(driver_dir, item)
-            if os.path.isfile(item_path):
-                datas.append((item_path, "playwright/driver"))
-            elif os.path.isdir(item_path):
-                for root, dirs, files in os.walk(item_path):
-                    for f in files:
-                        src = os.path.join(root, f)
-                        rel = os.path.relpath(root, driver_dir)
-                        datas.append((src, os.path.join("playwright/driver", rel)))
-except Exception as e:
-    print(f"[WARN] Could not bundle Playwright driver: {e}")
-
-# Try to bundle the Chromium browser binary if it was installed.
-# Playwright stores browsers in ~/AppData/Local/ms-playwright on Windows.
-try:
-    browser_cache = os.path.join(
-        os.environ.get("LOCALAPPDATA", os.path.expanduser("~")),
-        "ms-playwright"
-    )
-    if os.path.isdir(browser_cache):
-        for chromium_dir in os.listdir(browser_cache):
-            if "chromium" in chromium_dir.lower():
-                src_dir = os.path.join(browser_cache, chromium_dir)
-                for root, dirs, files in os.walk(src_dir):
-                    for f in files:
-                        src = os.path.join(root, f)
-                        rel = os.path.relpath(root, src_dir)
-                        datas.append((src, os.path.join("ms-playwright", chromium_dir, rel)))
-except Exception as e:
-    print(f"[WARN] Could not bundle Chromium browser: {e}")
+# ── Data files ──────────────────────────────────────────────────────
+# NOTE: Do NOT bundle agent_config.json — it contains machine-specific
+# absolute paths that break on other PCs. The agent creates a fresh
+# profile under %LOCALAPPDATA%\AutoSocialAI on first run instead.
+datas = []
 
 # ── Env bootstrap (production URL baked in) ─────────────────────────
 # Production URLs are baked in as DEFAULTS. The agent reads overrides
@@ -143,7 +113,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=["tkinter", "matplotlib", "numpy", "pandas", "scipy", "selenium"],
+    excludes=["tkinter", "matplotlib", "numpy", "pandas", "scipy"],
     cipher=block_cipher,
     noarchive=False,
 )

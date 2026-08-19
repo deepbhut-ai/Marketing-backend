@@ -2,7 +2,18 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
-from core.automation_engine.browser.browser_manager import By, Keys
+from selenium.common.exceptions import (
+    NoSuchElementException,
+    StaleElementReferenceException,
+    TimeoutException,
+    WebDriverException,
+)
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.remote.webdriver import WebDriver
+from selenium.webdriver.remote.webelement import WebElement
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
 
 
 @dataclass(frozen=True)
@@ -10,13 +21,13 @@ class InstagramComment:
     id: str
     author: str
     text: str
-    element: object  # SeleniumCompatElement
+    element: WebElement
 
 
 class InstagramCommentAutomation:
-    def __init__(self, driver, wait_seconds: int = 20):
+    def __init__(self, driver: WebDriver, wait_seconds: int = 20):
         self.driver = driver
-        self.wait_seconds = wait_seconds
+        self.wait = WebDriverWait(driver, wait_seconds)
         self.replied_comments: set[str] = set()
         self.seen_comments: set[str] = set()
 
@@ -78,29 +89,15 @@ class InstagramCommentAutomation:
             self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", reply_button)
             reply_button.click()
 
-            textbox = None
-            end_time = time.time() + self.wait_seconds
-            while time.time() < end_time:
-                try:
-                    boxes = self.driver.find_elements(
+            textbox = self.wait.until(
+                EC.element_to_be_clickable(
+                    (
                         By.XPATH,
                         "//textarea[@placeholder='Add a comment...' or @aria-label='Add a comment...']"
                         " | //*[@contenteditable='true' and @role='textbox']",
                     )
-                    for box in boxes:
-                        if box.is_displayed() and box.is_enabled():
-                            textbox = box
-                            break
-                    if textbox:
-                        break
-                except Exception:
-                    pass
-                time.sleep(0.5)
-
-            if not textbox:
-                print(f"Reply failed for {comment.author}: textbox not found")
-                return False
-
+                )
+            )
             textbox.send_keys(reply_text)
             time.sleep(0.5)
 
@@ -110,7 +107,7 @@ class InstagramCommentAutomation:
             print(f"Reply sent to {comment.author}: {reply_text}")
             return True
 
-        except Exception as exc:
+        except (NoSuchElementException, TimeoutException, StaleElementReferenceException) as exc:
             print(f"Reply failed for {comment.author}: {exc}")
             return False
 
@@ -147,34 +144,29 @@ class InstagramCommentAutomation:
                 time.sleep(10)
 
     def _wait_for_comments_area(self) -> None:
-        end_time = time.time() + self.wait_seconds
-        while time.time() < end_time:
-            els = self.driver.find_elements(
-                By.XPATH,
-                "//article//time | //div[@role='dialog']//time",
+        self.wait.until(
+            EC.presence_of_element_located(
+                (
+                    By.XPATH,
+                    "//article//time | //div[@role='dialog']//time",
+                )
             )
-            if els:
-                return
-            time.sleep(0.5)
-        raise TimeoutError("Comments area not loaded")
+        )
 
     def _wait_for_post_page(self) -> None:
-        end_time = time.time() + self.wait_seconds
-        while time.time() < end_time:
-            if (
-                self.driver.find_elements(By.TAG_NAME, "article")
-                or self.driver.find_elements(By.XPATH, "//*[contains(text(), 'Log in') or contains(text(), 'Sign up')]")
-                or self.driver.find_elements(By.XPATH, "//*[contains(text(), \"Sorry, this page isn't available\")]")
-            ):
-                return
-            time.sleep(0.5)
-        raise TimeoutError("Post page did not load")
+        self.wait.until(
+            lambda driver: (
+                driver.find_elements(By.TAG_NAME, "article")
+                or driver.find_elements(By.XPATH, "//*[contains(text(), 'Log in') or contains(text(), 'Sign up')]")
+                or driver.find_elements(By.XPATH, "//*[contains(text(), \"Sorry, this page isn't available\")]")
+            )
+        )
 
     def _comments_area_loaded(self) -> bool:
         try:
             self._wait_for_comments_area()
             return True
-        except TimeoutError:
+        except TimeoutException:
             return False
 
     def _raise_if_instagram_blocked(self) -> None:
@@ -208,10 +200,10 @@ class InstagramCommentAutomation:
                 comment = self._comment_from_element(element)
                 if comment:
                     yield comment
-            except Exception:
+            except StaleElementReferenceException:
                 continue
 
-    def _comment_from_element(self, element) -> Optional[InstagramComment]:
+    def _comment_from_element(self, element: WebElement) -> Optional[InstagramComment]:
         author = self._extract_author(element)
         text = self._extract_comment_text(element, author)
 
@@ -221,7 +213,7 @@ class InstagramCommentAutomation:
         comment_id = self._extract_comment_id(element, author, text)
         return InstagramComment(id=comment_id, author=author, text=text, element=element)
 
-    def _extract_author(self, element) -> str:
+    def _extract_author(self, element: WebElement) -> str:
         links = element.find_elements(By.XPATH, ".//a[@role='link' and string-length(normalize-space()) > 0]")
 
         for link in links:
@@ -239,7 +231,7 @@ class InstagramCommentAutomation:
 
         return ""
 
-    def _extract_comment_text(self, element, author: str) -> str:
+    def _extract_comment_text(self, element: WebElement, author: str) -> str:
         ignored = {
             author,
             "Reply",
@@ -260,7 +252,7 @@ class InstagramCommentAutomation:
 
         return ""
 
-    def _extract_comment_id(self, element, author: str, text: str) -> str:
+    def _extract_comment_id(self, element: WebElement, author: str, text: str) -> str:
         time_links = element.find_elements(By.XPATH, ".//a[.//time]")
 
         for link in time_links:
@@ -282,7 +274,7 @@ class InstagramCommentAutomation:
 
         self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-    def _find_scrollable_comments_container(self):
+    def _find_scrollable_comments_container(self) -> Optional[WebElement]:
         containers = self.driver.find_elements(
             By.XPATH,
             "//div[@role='dialog']//div[count(.//time) >= 2] | //article//div[count(.//time) >= 2]",
@@ -296,7 +288,7 @@ class InstagramCommentAutomation:
                 )
                 if can_scroll:
                     return container
-            except Exception:
+            except StaleElementReferenceException:
                 continue
 
         return None
@@ -746,7 +738,7 @@ def _clean_error_message(exc: Exception) -> str:
     if message:
         return message.split("Stacktrace:")[0].strip()
 
-    if isinstance(exc, TimeoutError):
+    if isinstance(exc, TimeoutException):
         return "Timed out waiting for Instagram post content. Check login state, post URL, and network speed."
 
     return exc.__class__.__name__

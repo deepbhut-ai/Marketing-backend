@@ -1,16 +1,12 @@
 import time
 import re
 
-from core.automation_engine.browser.browser_manager import By, Keys
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-try:
-    from src.services.ai_reply import generate_ai_reply
-except ImportError:
-    try:
-        from core.automation_engine.common.ai_reply_stub import generate_ai_reply
-    except ImportError:
-        def generate_ai_reply(comment_text, reply_text=None):
-            return reply_text or "Thank you for your comment!"
+from src.services.ai_reply import generate_ai_reply
 
 SILENT = False
 
@@ -171,12 +167,9 @@ def check_x_comments(driver, post_url):
 
         driver.get(post_url)
 
-        # Wait for body to be present (simple polling)
-        end_time = time.time() + 30
-        while time.time() < end_time:
-            if driver.find_elements(By.TAG_NAME, "body"):
-                break
-            time.sleep(0.5)
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
 
         time.sleep(5)
 
@@ -257,25 +250,12 @@ def click_x_reply_button(article):
 
 def type_x_reply(driver, reply_text):
     try:
-        # Wait for textbox to be present (simple polling)
-        textbox = None
-        end_time = time.time() + 15
-        while time.time() < end_time:
-            boxes = driver.find_elements(
+        textbox = WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((
                 By.XPATH,
                 "//div[@role='textbox' and @contenteditable='true']"
-            )
-            for box in boxes:
-                if box.is_displayed():
-                    textbox = box
-                    break
-            if textbox:
-                break
-            time.sleep(0.5)
-
-        if not textbox:
-            print("X TYPE REPLY ERROR: textbox not found")
-            return None
+            ))
+        )
 
         textbox.click()
         time.sleep(1)
@@ -294,24 +274,12 @@ def type_x_reply(driver, reply_text):
 
 def submit_x_reply(driver):
     try:
-        # Wait for post button to be clickable (simple polling)
-        btn = None
-        end_time = time.time() + 15
-        while time.time() < end_time:
-            btns = driver.find_elements(
+        btn = WebDriverWait(driver, 15).until(
+            EC.element_to_be_clickable((
                 By.XPATH,
                 "//*[@data-testid='tweetButton' or @data-testid='tweetButtonInline']"
-            )
-            for b in btns:
-                if b.is_displayed() and b.is_enabled():
-                    btn = b
-                    break
-            if btn:
-                break
-            time.sleep(0.5)
-
-        if not btn:
-            raise Exception("Post button not found")
+            ))
+        )
 
         btn.click()
         time.sleep(4)
@@ -322,9 +290,8 @@ def submit_x_reply(driver):
         print("X SUBMIT REPLY ERROR:", e)
 
         try:
-            # Use Playwright keyboard shortcut as fallback
-            page = driver._raw_page
-            page.keyboard.press("Control+Enter")
+            active = driver.switch_to.active_element
+            active.send_keys(Keys.CONTROL, Keys.ENTER)
             time.sleep(4)
             return True
         except Exception:
@@ -337,12 +304,9 @@ def reply_x_comment(driver, post_url, reply_text=None, author=None, comment_text
 
         driver.get(post_url)
 
-        # Wait for body to be present (simple polling)
-        end_time = time.time() + 30
-        while time.time() < end_time:
-            if driver.find_elements(By.TAG_NAME, "body"):
-                break
-            time.sleep(0.5)
+        WebDriverWait(driver, 30).until(
+            EC.presence_of_element_located((By.TAG_NAME, "body"))
+        )
 
         time.sleep(4)
 

@@ -10,7 +10,9 @@ from PIL import Image
 if sys.platform == "win32":
     import win32clipboard
 
-from core.automation_engine.browser.browser_manager import By, Keys
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.by import By
 
 from core.automation_engine.common.tab_manager import open_new_tab
 from core.automation_engine.common.click_helper import safe_click
@@ -30,6 +32,7 @@ from .utils import (
 def click_element_robustly(driver, element, name="Element"):
     for action in [
         lambda: safe_click(driver, element),
+        lambda: ActionChains(driver).move_to_element(element).pause(0.3).click().perform(),
         lambda: element.click(),
         lambda: driver.execute_script("arguments[0].click();", element),
     ]:
@@ -167,11 +170,15 @@ def paste_image_from_clipboard(driver, textbox, media_file):
         time.sleep(1)
 
         # On macOS, Cmd+V is the paste shortcut; on Windows it's Ctrl+V.
-        mod_key = "Meta" if sys.platform == "darwin" else "Control"
+        mod_key = Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL
 
-        # Use Playwright keyboard API instead of Selenium ActionChains
-        page = driver._raw_page
-        page.keyboard.press(f"{mod_key}+v")
+        ActionChains(driver) \
+            .move_to_element(textbox) \
+            .click(textbox) \
+            .key_down(mod_key) \
+            .send_keys("v") \
+            .key_up(mod_key) \
+            .perform()
 
         time.sleep(6)
         return True
@@ -457,10 +464,11 @@ def post_using_ctrl_enter(driver, textbox=None):
             except Exception:
                 pass
 
-        # Use Playwright keyboard API instead of Selenium ActionChains
-        page = driver._raw_page
-        mod_key = "Meta" if sys.platform == "darwin" else "Control"
-        page.keyboard.press(f"{mod_key}+Enter")
+        ActionChains(driver) \
+            .key_down(Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL) \
+            .send_keys(Keys.ENTER) \
+            .key_up(Keys.COMMAND if sys.platform == "darwin" else Keys.CONTROL) \
+            .perform()
 
         time.sleep(5)
 
