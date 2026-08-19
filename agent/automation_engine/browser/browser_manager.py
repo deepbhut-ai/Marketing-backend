@@ -505,43 +505,68 @@ class BrowserManager:
 
         options = self._build_options()
 
-        try:
-            chromedriver_path = self._resolve_chromedriver_path()
-            if chromedriver_path:
-                from selenium.webdriver.chrome.service import Service
-                service = Service(executable_path=chromedriver_path)
-                driver = webdriver.Chrome(service=service, options=options)
-            else:
-                driver = webdriver.Chrome(options=options)
-            driver.implicitly_wait(5)
-
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
             try:
-                driver.execute_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                )
-            except Exception:
-                pass
+                chromedriver_path = self._resolve_chromedriver_path()
+                if chromedriver_path:
+                    from selenium.webdriver.chrome.service import Service
+                    service = Service(executable_path=chromedriver_path)
+                    driver = webdriver.Chrome(service=service, options=options)
+                else:
+                    driver = webdriver.Chrome(options=options)
+                driver.implicitly_wait(5)
 
-            print("✅ AutoSocial Chrome opened successfully")
-            print(f"📁 Profile path: {self.user_data_dir}")
-            print(f"👤 Profile directory: {self.profile_directory}")
+                try:
+                    driver.execute_script(
+                        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                    )
+                except Exception:
+                    pass
 
-            self.driver = driver
-            return driver
+                print("✅ AutoSocial Chrome opened successfully")
+                print(f"📁 Profile path: {self.user_data_dir}")
+                print(f"👤 Profile directory: {self.profile_directory}")
 
-        except WebDriverException as exc:
-            raise RuntimeError(
-                "Failed to start Chrome browser.\n"
-                "Possible reasons:\n"
-                "1. AutoSocial Chrome is already open with same profile\n"
-                "2. Profile path is corrupted\n"
-                "3. ChromeDriver version issue\n\n"
-                "Important: This code does NOT close user's normal Chrome windows.\n"
-                "Please close only AutoSocial Chrome if it is already open.\n\n"
-                f"Original error: {exc}"
-            )
+                self.driver = driver
+                return driver
 
-    @staticmethod
+            except WebDriverException as exc:
+                if attempt < max_retries:
+                    print(f"[WARN] Chrome launch attempt {attempt}/{max_retries} failed: {exc}")
+                    print(f"[INFO] Cleaning up and retrying in 3 seconds...")
+                    # Kill stale Chrome on this profile
+                    stale_pids = BrowserManager._find_chrome_processes_for_profile(self.user_data_dir)
+                    for pid in stale_pids:
+                        try:
+                            subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        except Exception:
+                            pass
+                    time.sleep(3)
+                    # Remove lock files
+                    for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                        lock_path = os.path.join(self.user_data_dir, lock)
+                        if os.path.exists(lock_path):
+                            try:
+                                os.remove(lock_path)
+                            except Exception:
+                                pass
+                    BrowserManager.cleanup_chromedriver_only()
+                    time.sleep(2)
+                    # Rebuild options for fresh attempt
+                    options = self._build_options()
+                else:
+                    raise RuntimeError(
+                        "Failed to start Chrome browser after " + str(max_retries) + " attempts.\n"
+                        "Possible reasons:\n"
+                        "1. AutoSocial Chrome is already open with same profile\n"
+                        "2. Profile path is corrupted\n"
+                        "3. ChromeDriver version issue\n\n"
+                        "Important: This code does NOT close user's normal Chrome windows.\n"
+                        "Please close only AutoSocial Chrome if it is already open.\n\n"
+                        f"Original error: {exc}"
+                    )
     def _resolve_chromedriver_path() -> Optional[str]:
         """
         Find the newest chromedriver in the Selenium cache.

@@ -221,7 +221,35 @@ def open_platform_login_pages(browser_manager):
         print("[OK] Chrome opened for platform login", flush=True)
     except Exception as e:
         print(f"[ERROR] Could not open Chrome for login: {e}", flush=True)
-        return
+        print("[INFO] Retrying with aggressive cleanup...", flush=True)
+        try:
+            import subprocess
+            # Kill ALL chromedriver processes
+            BrowserManager.cleanup_chromedriver_only()
+            # Kill stale Chrome on this profile
+            stale_pids = BrowserManager._find_chrome_processes_for_profile(browser_manager.user_data_dir)
+            for pid in stale_pids:
+                try:
+                    subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+            time.sleep(3)
+            # Remove lock files
+            for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                lock_path = os.path.join(browser_manager.user_data_dir, lock)
+                if os.path.exists(lock_path):
+                    try:
+                        os.remove(lock_path)
+                    except Exception:
+                        pass
+            browser_manager.driver = None
+            driver = browser_manager.start_browser()
+            print("[OK] Chrome opened for platform login (on retry)", flush=True)
+        except Exception as e2:
+            print(f"[ERROR] Retry also failed: {e2}", flush=True)
+            print("[INFO] Skipping platform login. Chrome will start when a task arrives.", flush=True)
+            return
 
     try:
         # Load the first URL in the current tab so the browser has an active page.
@@ -482,6 +510,40 @@ async def main():
                         print("[INFO] No console input available; continuing.", flush=True)
                 except Exception as e:
                     print(f"[ERROR] Could not open Chrome: {e}", flush=True)
+                    # Retry: kill stale Chrome processes on this profile, clean locks, try again
+                    print("[INFO] Retrying — killing stale Chrome and cleaning locks...", flush=True)
+                    try:
+                        import subprocess
+                        stale_pids = BrowserManager._find_chrome_processes_for_profile(user_data_dir)
+                        for pid in stale_pids:
+                            try:
+                                subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            except Exception:
+                                pass
+                        time.sleep(3)
+                        # Remove lock files again after killing stale processes
+                        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                            lock_path = os.path.join(user_data_dir, lock)
+                            if os.path.exists(lock_path):
+                                try:
+                                    os.remove(lock_path)
+                                except Exception:
+                                    pass
+                        BrowserManager.cleanup_chromedriver_only()
+                        browser_manager.driver = None
+                        browser_manager.start_browser()
+                        open_platform_login_pages(browser_manager)
+                        chrome_opened_in_step3 = True
+                        print("[OK] Chrome opened on retry.", flush=True)
+                        print("Press ENTER to continue... (keep Chrome open)", flush=True)
+                        try:
+                            input()
+                        except EOFError:
+                            print("[INFO] No console input available; continuing.", flush=True)
+                    except Exception as e2:
+                        print(f"[ERROR] Retry also failed: {e2}", flush=True)
+                        print("[INFO] Chrome will start when a task arrives.", flush=True)
                 print("[OK] Using existing logins.\n", flush=True)
             else:
                 open_platform_login_pages(browser_manager)
@@ -509,7 +571,32 @@ async def main():
         print("[OK] Chrome started and ready\n", flush=True)
     except Exception as e:
         print(f"[ERROR] Chrome failed: {e}", flush=True)
-        print("[INFO] Will retry when a task arrives.\n", flush=True)
+        # Retry: kill stale Chrome, clean locks, try fresh launch
+        print("[INFO] Retrying Chrome launch with cleanup...", flush=True)
+        try:
+            import subprocess
+            BrowserManager.cleanup_chromedriver_only()
+            stale_pids = BrowserManager._find_chrome_processes_for_profile(browser_manager.user_data_dir)
+            for pid in stale_pids:
+                try:
+                    subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
+            time.sleep(3)
+            for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                lock_path = os.path.join(browser_manager.user_data_dir, lock)
+                if os.path.exists(lock_path):
+                    try:
+                        os.remove(lock_path)
+                    except Exception:
+                        pass
+            browser_manager.driver = None
+            browser_manager.start_browser()
+            print("[OK] Chrome started and ready (on retry)\n", flush=True)
+        except Exception as e2:
+            print(f"[ERROR] Chrome retry also failed: {e2}", flush=True)
+            print("[INFO] Will retry when a task arrives.\n", flush=True)
 
     # ── Step 5: Connect to backend ───────────────────────
     print("[Step 5/5] Connecting to backend", flush=True)
