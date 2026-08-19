@@ -260,21 +260,24 @@ class BrowserManager:
         )
         if chrome_running:
             print("\n[INFO] Google Chrome is running. Closing it to import profile safely...")
-            try:
-                subprocess.call("taskkill /F /IM chrome.exe", shell=True,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for kill_attempt in range(1, 4):
+                try:
+                    subprocess.call("taskkill /F /IM chrome.exe", shell=True,
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                except Exception:
+                    pass
                 time.sleep(3)
-            except Exception:
-                pass
-            # Verify Chrome is closed
-            still_running = any(
-                p.info.get("name", "").lower() == "chrome.exe"
-                for p in psutil.process_iter(["name"])
-            )
-            if still_running:
-                print("[WARN] Chrome is still running. Importing anyway (some files may be skipped).")
+                # Check if Chrome is closed
+                still_running = any(
+                    p.info.get("name", "").lower() == "chrome.exe"
+                    for p in psutil.process_iter(["name"])
+                )
+                if not still_running:
+                    print("[OK] Chrome closed. Proceeding with clean import.")
+                    break
+                print(f"[WARN] Chrome still running after attempt {kill_attempt}/3. Retrying...")
             else:
-                print("[OK] Chrome closed. Proceeding with clean import.")
+                print("[ERROR] Could not close Chrome after 3 attempts. Importing anyway.")
 
         print("\n📥 Importing selected Chrome profile...")
         print(f"   From: {source_profile_path}")
