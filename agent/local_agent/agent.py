@@ -216,6 +216,45 @@ def open_platform_login_pages(browser_manager):
     print("  4. X (Twitter)", flush=True)
     print("", flush=True)
 
+    # Clean stale Chrome processes and lock files BEFORE launching Chrome
+    # to prevent "session not created: Chrome instance exited" errors.
+    import subprocess
+    stale_pids = BrowserManager._find_chrome_processes_for_profile(browser_manager.user_data_dir)
+    if stale_pids:
+        print(f"[INFO] Closing {len(stale_pids)} stale Chrome process(es)...", flush=True)
+        for pid in stale_pids:
+            try:
+                subprocess.call(f"taskkill /F /PID {pid}", shell=True,
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+        time.sleep(3)
+    BrowserManager.cleanup_chromedriver_only()
+    # Clean lock files at BOTH root and profile folder level
+    for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+        # Root level
+        lock_path = os.path.join(browser_manager.user_data_dir, lock)
+        if os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+            except Exception:
+                pass
+        # Inside profile folder
+        lock_path = os.path.join(browser_manager.user_data_dir, browser_manager.profile_directory, lock)
+        if os.path.exists(lock_path):
+            try:
+                os.remove(lock_path)
+            except Exception:
+                pass
+    # Remove lockfile inside profile folder
+    lockfile_path = os.path.join(browser_manager.user_data_dir, browser_manager.profile_directory, "lockfile")
+    if os.path.exists(lockfile_path):
+        try:
+            os.remove(lockfile_path)
+        except Exception:
+            pass
+    browser_manager.driver = None
+
     try:
         driver = browser_manager.start_browser()
         print("[OK] Chrome opened for platform login", flush=True)
@@ -235,14 +274,29 @@ def open_platform_login_pages(browser_manager):
                 except Exception:
                     pass
             time.sleep(3)
-            # Remove lock files
+            # Remove lock files at BOTH root and profile folder level
             for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
+                # Root level
                 lock_path = os.path.join(browser_manager.user_data_dir, lock)
                 if os.path.exists(lock_path):
                     try:
                         os.remove(lock_path)
                     except Exception:
                         pass
+                # Inside profile folder
+                lock_path = os.path.join(browser_manager.user_data_dir, browser_manager.profile_directory, lock)
+                if os.path.exists(lock_path):
+                    try:
+                        os.remove(lock_path)
+                    except Exception:
+                        pass
+            # Remove lockfile inside profile folder
+            lockfile_path = os.path.join(browser_manager.user_data_dir, browser_manager.profile_directory, "lockfile")
+            if os.path.exists(lockfile_path):
+                try:
+                    os.remove(lockfile_path)
+                except Exception:
+                    pass
             browser_manager.driver = None
             driver = browser_manager.start_browser()
             print("[OK] Chrome opened for platform login (on retry)", flush=True)
@@ -317,42 +371,33 @@ def load_or_create_profile():
         print(f"[OK] Using per-user Chrome profile: {chrome_user_data_dir} / {chrome_profile_dir}")
         return chrome_user_data_dir, chrome_profile_dir
 
-    # Always use the saved profile if it exists and is valid. Detect stale
-    # configs created before the profile-name-preservation fix and force a
-    # re-selection so the user picks the correct profile.
-    def _is_stale_config(config):
+    # Use the saved profile automatically if it exists on disk.
+    # Only ask for re-selection if the saved profile is missing/invalid.
+    def _is_valid_saved_config(config):
         saved_dir = config.get("user_data_dir", "")
         saved_profile = config.get("profile_directory", "")
-        # Old generic copy: everything dumped into AutoSocialAI\chrome_profile\Default
-        if saved_profile == "Default" and saved_dir.endswith("AutoSocialAI\\chrome_profile"):
-            return True
-        # Missing/empty values
         if not saved_dir or not saved_profile:
+            return False
+        # Check that the profile directory actually exists on disk.
+        profile_path = os.path.join(saved_dir, saved_profile)
+        if os.path.isdir(profile_path):
             return True
-        return False
+        # For a fresh profile the sub-folder may not exist yet, but the
+        # user_data_dir itself should exist.
+        return os.path.isdir(saved_dir)
 
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             config = json.load(f)
 
-        if _is_stale_config(config):
-            print("\n[WARN] Saved profile config is stale or generic (Default).")
-            print("[INFO] Please select your Chrome profile again.")
+        if _is_valid_saved_config(config):
+            saved_dir = config.get("user_data_dir", "")
+            saved_profile = config.get("profile_directory", "Default")
+            print(f"[OK] Using saved profile: {saved_dir} / {saved_profile}")
+            return saved_dir, saved_profile
         else:
-            print("\n[CONFIG] Chrome Profile Found")
-            print(f"   Current: {config.get('user_data_dir')} / {config.get('profile_directory')}")
-            print("1. Use saved profile")
-            print("2. Change / Select new profile")
-
-            choice = input("Select option: ").strip()
-
-            if choice == "1":
-                saved_dir = config.get("user_data_dir", "")
-                saved_profile = config.get("profile_directory", "Default")
-                print(f"[OK] Using saved profile: {saved_dir} / {saved_profile}")
-                return saved_dir, saved_profile
-
-            print("[INFO] Changing profile...")
+            print("\n[WARN] Saved profile no longer exists on disk.")
+            print("[INFO] Please select your Chrome profile again.")
 
     # No saved config or user wants to change — ask for profile selection.
     user_data_dir, profile_directory = BrowserManager.ask_profile_setup()
@@ -471,115 +516,17 @@ async def main():
     # Backend auto-start sets AGENT_TOKEN but NOT AGENT_TOKEN_FROM_CONFIG.
     is_auto_start = os.getenv("AGENT_TOKEN") and not os.getenv("AGENT_TOKEN_FROM_CONFIG")
 
-    if has_existing_profile and is_auto_start and not os.getenv("AGENT_TOKEN_FROM_CONFIG"):
-        # Auto-start mode with existing profile — skip login prompt to avoid
-        # interrupting the backend-managed startup flow.
-        print("[OK] Chrome profile already has saved logins. Skipping.", flush=True)
+    if has_existing_profile:
+        # Profile already has saved logins — just open Chrome directly.
+        # No need to ask "re-login or use existing" every time.
+        print("[OK] Chrome profile already has saved logins.", flush=True)
         print("[INFO] To re-login, delete the profile folder and run again.\n", flush=True)
     else:
-        # Interactive mode or fresh profile — open login pages
-        if has_existing_profile:
-            print("[INFO] Chrome profile exists. You can re-login or skip.", flush=True)
-            print("  1. Open platform login pages (re-login)", flush=True)
-            print("  2. Open Chrome with existing logins", flush=True)
-            choice = input("Select option (1/2): ").strip()
-            if choice == "2":
-                # Open a fresh Chrome with the existing profile and immediately load the
-                # platform pages so the user can verify the saved logins are working.
-                try:
-                    import subprocess
-                    # Kill any stale Chrome processes on the AutoSocial profile
-                    stale_pids = BrowserManager._find_chrome_processes_for_profile(user_data_dir)
-                    if stale_pids:
-                        print(f"[INFO] Closing {len(stale_pids)} stale Chrome process(es)...", flush=True)
-                        for pid in stale_pids:
-                            try:
-                                subprocess.call(f"taskkill /F /PID {pid}", shell=True,
-                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            except Exception:
-                                pass
-                        time.sleep(3)
-                    # Clean up lock files at BOTH root and profile folder level
-                    BrowserManager.cleanup_chromedriver_only()
-                    for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
-                        # Root level
-                        lock_path = os.path.join(user_data_dir, lock)
-                        if os.path.exists(lock_path):
-                            try:
-                                os.remove(lock_path)
-                            except Exception:
-                                pass
-                        # Inside profile folder
-                        lock_path = os.path.join(user_data_dir, profile_directory, lock)
-                        if os.path.exists(lock_path):
-                            try:
-                                os.remove(lock_path)
-                            except Exception:
-                                pass
-                    # Also remove lockfile inside profile folder
-                    lockfile_path = os.path.join(user_data_dir, profile_directory, "lockfile")
-                    if os.path.exists(lockfile_path):
-                        try:
-                            os.remove(lockfile_path)
-                        except Exception:
-                            pass
-                    # Force a fresh launch instead of reconnecting to a stale session.
-                    browser_manager.driver = None
-                    browser_manager.start_browser()
-                    open_platform_login_pages(browser_manager)
-                    chrome_opened_in_step3 = True
-                    print("[OK] Chrome opened with existing profile and platform tabs.", flush=True)
-                    print("Press ENTER to continue... (keep Chrome open)", flush=True)
-                    try:
-                        input()
-                    except EOFError:
-                        print("[INFO] No console input available; continuing.", flush=True)
-                except Exception as e:
-                    print(f"[ERROR] Could not open Chrome: {e}", flush=True)
-                    # Retry: kill stale Chrome processes on this profile, clean locks, try again
-                    print("[INFO] Retrying — killing stale Chrome and cleaning locks...", flush=True)
-                    try:
-                        import subprocess
-                        stale_pids = BrowserManager._find_chrome_processes_for_profile(user_data_dir)
-                        for pid in stale_pids:
-                            try:
-                                subprocess.call(f"taskkill /F /PID {pid}", shell=True,
-                                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            except Exception:
-                                pass
-                        time.sleep(3)
-                        # Remove lock files again after killing stale processes
-                        for lock in ("SingletonLock", "SingletonSocket", "SingletonCookie", "DevToolsActivePort"):
-                            lock_path = os.path.join(user_data_dir, lock)
-                            if os.path.exists(lock_path):
-                                try:
-                                    os.remove(lock_path)
-                                except Exception:
-                                    pass
-                        BrowserManager.cleanup_chromedriver_only()
-                        browser_manager.driver = None
-                        browser_manager.start_browser()
-                        open_platform_login_pages(browser_manager)
-                        chrome_opened_in_step3 = True
-                        print("[OK] Chrome opened on retry.", flush=True)
-                        print("Press ENTER to continue... (keep Chrome open)", flush=True)
-                        try:
-                            input()
-                        except EOFError:
-                            print("[INFO] No console input available; continuing.", flush=True)
-                    except Exception as e2:
-                        print(f"[ERROR] Retry also failed: {e2}", flush=True)
-                        print("[INFO] Chrome will start when a task arrives.", flush=True)
-                print("[OK] Using existing logins.\n", flush=True)
-            else:
-                open_platform_login_pages(browser_manager)
-                chrome_opened_in_step3 = True
-                print("[OK] Platform logins done.\n", flush=True)
-        else:
-            print("[INFO] Fresh Chrome profile — please log in to platforms.", flush=True)
-            open_platform_login_pages(browser_manager)
-            chrome_opened_in_step3 = True
-            print("[OK] Platform logins done.\n", flush=True)
+        # Fresh profile — no saved logins yet, open the platform login pages.
+        print("[INFO] Fresh Chrome profile — please log in to platforms.", flush=True)
+        open_platform_login_pages(browser_manager)
+        chrome_opened_in_step3 = True
+        print("[OK] Platform logins done.\n", flush=True)
 
     # ── Step 4: Ensure automation Chrome is ready ──────
     print("[Step 4/5] Starting Chrome", flush=True)
