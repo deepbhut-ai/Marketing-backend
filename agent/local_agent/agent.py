@@ -281,58 +281,27 @@ def load_or_create_profile():
     Load profile or allow user to change it.
 
     Priority:
-    1. Fetch from backend API using agent token (always gets latest from DB)
-    2. CHROME_USER_DATA_DIR env var (set by backend per-user profile)
-    3. AGENT_TOKEN env var (auto-start mode) → use saved config
-    4. Interactive mode → ask user
+    1. CHROME_USER_DATA_DIR env var (set by backend per-user profile — auto-start)
+    2. Local agent_config.json (saved from previous run on THIS machine)
+    3. Backend API (fetch from DB — may be from a different machine/OS)
+    4. Interactive mode → ask user to select/import a profile
     """
     agent_token = os.getenv("AGENT_TOKEN")
 
-    # 1. Fetch profile from backend API (highest priority — always current)
-    if agent_token:
-        try:
-            resp = requests.get(
-                f"{DJANGO_BASE_URL}/agent-profile/by-token/",
-                params={"token": agent_token},
-                timeout=10,
-            )
-            if resp.status_code == 200 and resp.json().get("success"):
-                data = resp.json()["data"]
-                user_data_dir = data.get("user_data_dir")
-                profile_directory = data.get("profile_directory", "Default")
-                # Never reuse the user's daily Chrome profile in automation —
-                # that causes "Chrome instance exited" when Chrome is already running.
-                # Also check that the path actually exists on THIS machine —
-                # the backend may store a path from a different OS/machine.
-                if user_data_dir and "Google\\Chrome\\User Data" not in user_data_dir:
-                    if os.path.isdir(user_data_dir):
-                        print(f"[OK] Fetched Chrome profile from DB: {user_data_dir} / {profile_directory}")
-                        return user_data_dir, profile_directory
-                    else:
-                        print(f"[WARN] DB profile path does not exist on this machine: {user_data_dir}")
-                        print("[INFO] Falling back to local saved profile.")
-                else:
-                    print("[WARN] Backend returned daily Chrome profile; using dedicated automation profile instead.")
-        except Exception as e:
-            print(f"[WARN] Could not fetch profile from API: {e}")
-
-    # 2. Per-user profile from env var
+    # 1. Per-user profile from env var (auto-start mode — highest priority)
     chrome_user_data_dir = os.getenv("CHROME_USER_DATA_DIR")
     chrome_profile_dir = os.getenv("CHROME_PROFILE_DIRECTORY", "Default")
     if chrome_user_data_dir and "Google\\Chrome\\User Data" not in chrome_user_data_dir:
         print(f"[OK] Using per-user Chrome profile: {chrome_user_data_dir} / {chrome_profile_dir}")
         return chrome_user_data_dir, chrome_profile_dir
 
-    # Always use the saved profile if it exists and is valid. Detect stale
-    # configs created before the profile-name-preservation fix and force a
-    # re-selection so the user picks the correct profile.
+    # 2. Local saved config (agent_config.json next to the exe)
+    # This is always correct for THIS machine — check it BEFORE the DB API.
     def _is_stale_config(config):
         saved_dir = config.get("user_data_dir", "")
         saved_profile = config.get("profile_directory", "")
-        # Old generic copy: everything dumped into AutoSocialAI\chrome_profile\Default
         if saved_profile == "Default" and saved_dir.endswith("AutoSocialAI\\chrome_profile"):
             return True
-        # Missing/empty values
         if not saved_dir or not saved_profile:
             return True
         return False
@@ -360,6 +329,30 @@ def load_or_create_profile():
 
             print("[INFO] Changing profile...")
 
+    # 3. Fetch from backend API (may be from a different machine/OS)
+    if agent_token:
+        try:
+            resp = requests.get(
+                f"{DJANGO_BASE_URL}/agent-profile/by-token/",
+                params={"token": agent_token},
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json().get("success"):
+                data = resp.json()["data"]
+                db_user_data_dir = data.get("user_data_dir")
+                db_profile_directory = data.get("profile_directory", "Default")
+                if db_user_data_dir and "Google\\Chrome\\User Data" not in db_user_data_dir:
+                    if os.path.isdir(db_user_data_dir):
+                        print(f"[OK] Fetched Chrome profile from DB: {db_user_data_dir} / {db_profile_directory}")
+                        return db_user_data_dir, db_profile_directory
+                    else:
+                        print(f"[WARN] DB profile path does not exist on this machine: {db_user_data_dir}")
+                        print("[INFO] Please select a profile below.")
+                else:
+                    print("[WARN] Backend returned daily Chrome profile; using dedicated automation profile instead.")
+        except Exception as e:
+            print(f"[WARN] Could not fetch profile from API: {e}")
+
     # No saved config or user wants to change — ask for profile selection.
     user_data_dir, profile_directory = BrowserManager.ask_profile_setup()
 
@@ -372,6 +365,26 @@ def load_or_create_profile():
         json.dump(config, f, indent=4)
 
     print(f"[OK] Profile updated successfully: {user_data_dir} / {profile_directory}")
+
+    # Update the backend DB with the local profile path so the next
+    # API call returns the correct path for THIS machine.
+    if agent_token:
+        try:
+            resp = requests.post(
+                f"{DJANGO_BASE_URL}/agent-profile/update-by-token/",
+                json={
+                    "token": agent_token,
+                    "user_data_dir": user_data_dir,
+                    "profile_directory": profile_directory,
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200 and resp.json().get("success"):
+                print("[OK] Backend profile updated")
+            else:
+                print(f"[WARN] Could not update backend profile: {resp.text[:100]}")
+        except Exception as e:
+            print(f"[WARN] Could not update backend profile: {e}")
 
     return user_data_dir, profile_directory
 

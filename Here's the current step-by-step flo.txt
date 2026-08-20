@@ -1,0 +1,132 @@
+Here's the current step-by-step flow of `agent.exe`:
+
+## Step 1 — Authentication
+
+```
+[Step 1/5] Authentication
+```
+
+**Priority:**
+1. `AGENT_TOKEN` env var (auto-start mode — backend spawns the exe)
+2. `agent_config.txt` next to the exe (saved from previous run)
+3. Interactive menu:
+   - Option 1: Paste agent token directly
+   - Option 2: Login with email + password → backend returns token
+
+Token is saved to `agent_config.txt` so it won't ask again.
+
+---
+
+## Step 2 — Chrome Profile Setup
+
+```
+[Step 2/5] Chrome Profile Setup
+```
+
+**Priority:**
+1. **Backend API** (`/agent-profile/by-token/`) — fetches profile path from DB
+   - Checks if path exists on **this machine** (`os.path.isdir`)
+   - If path is from a different OS/machine (e.g. macOS path on Windows) → skip, fall back
+2. **`CHROME_USER_DATA_DIR` env var** (auto-start mode — backend sets per-user profile)
+3. **`agent_config.json`** next to the exe (saved from previous run)
+   - If valid → show menu: `1. Use saved profile / 2. Change`
+   - If stale/missing → ask for profile selection
+4. **Interactive profile selection** (`ask_profile_setup`):
+   - Option 1: Create new empty AutoSocial profile
+   - Option 2: Import existing Chrome profile
+     - Lists all Chrome profiles found on the machine
+     - User picks one
+     - **Auto-closes Chrome** if running with that profile (up to 3 retries)
+     - Copies profile to `AutoSocialAI\chrome_profile\<ProfileName>`
+     - Creates fresh `Local State` file
+     - **Cleans stale lock files** (`DevToolsActivePort`, `SingletonLock`, `lockfile`, etc.)
+   - Saves to `agent_config.json`
+
+---
+
+## Step 3 — Platform Login
+
+```
+[Step 3/5] Platform Login
+```
+
+Checks if profile has saved logins (`Preferences` file exists):
+
+- **Auto-start mode** (backend spawned) → skip login, use saved logins
+- **Interactive mode with existing profile:**
+  - Option 1: Open platform login pages (Instagram, Facebook, LinkedIn, X) — for re-login
+  - Option 2: Open Chrome with existing logins (just verify they work)
+- **Fresh profile** (no saved logins) → open platform login pages automatically
+
+Before opening Chrome:
+- Kills stale Chrome processes on the AutoSocial profile
+- Cleans lock files at **both root and profile folder level**
+- Kills stale chromedriver processes
+- Launches Chrome via Selenium
+
+User logs in to each platform in the Chrome window, then presses ENTER.
+
+---
+
+## Step 4 — Start Chrome
+
+```
+[Step 4/5] Starting Chrome
+```
+
+- If Chrome was opened in Step 3 → verify driver is alive, reuse it
+- If not → launch Chrome fresh via `start_browser()`
+
+`start_browser()` does:
+1. **Always cleans lock files** (root + profile folder level)
+2. Check if Chrome is already running on this profile → reconnect via CDP
+3. If not → kill stale Chrome, clean locks, launch fresh
+4. **3 retry attempts** with different strategies:
+   - Attempt 1: cached ChromeDriver
+   - Attempt 2: auto-download correct ChromeDriver
+   - Attempt 3: add `--no-sandbox`
+5. If all fail → retry with aggressive cleanup (kill + clean + relaunch)
+
+---
+
+## Step 5 — WebSocket Connection
+
+```
+[Step 5/5] Connecting to backend
+[WS] Connecting to wss://agents.zettalgor.com/ws/agent/?token=...
+```
+
+- Connects to backend WebSocket (`AGENT_WS_URL` env or default production URL)
+- On connect → waits for tasks
+- When a task arrives:
+  1. Downloads media URLs to temp files
+  2. Ensures Chrome is running (calls `start_browser()`)
+  3. Dispatches to browser worker → runs automation (post to Instagram/Facebook/LinkedIn/X)
+  4. Sends `task_result` back via WebSocket
+  5. Goes back to waiting for next task
+- If connection lost → retry in 5 seconds
+
+---
+
+## Config Files (next to the exe)
+
+| File | Format | Purpose |
+|------|--------|---------|
+| `agent_config.txt` | `KEY=value` | Token + URL overrides |
+| `agent_config.json` | JSON | Chrome profile path (`user_data_dir`, `profile_directory`) |
+
+---
+
+## First Run vs Subsequent Runs
+
+**First run:**
+1. Enter token → saved to `agent_config.txt`
+2. Select Chrome profile → imported → saved to `agent_config.json`
+3. Log in to platforms (Instagram, Facebook, LinkedIn, X)
+4. Chrome opens → WebSocket connects
+
+**Subsequent runs:**
+1. Token loaded from `agent_config.txt` (no prompt)
+2. Profile loaded from `agent_config.json` (menu: use saved or change)
+3. Login skipped if profile has saved logins (menu: re-login or use existing)
+4. Chrome opens → WebSocket connects

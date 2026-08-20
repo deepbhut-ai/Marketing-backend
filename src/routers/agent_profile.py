@@ -252,6 +252,68 @@ async def update_agent_profile(
     }
 
 
+@router.post("/update-by-token/")
+async def update_agent_profile_by_token(
+    data: dict,
+    db: AsyncSession = Depends(get_db),
+):
+    """Update the user's Chrome profile settings using agent token (no JWT).
+
+    Called by the agent exe after the user selects/imports a profile.
+    This updates the DB so the next by-token GET returns the correct
+    path for THIS machine.
+
+    Example body: {"token": "raw_agent_token", "user_data_dir": "C:\\path", "profile_directory": "Default"}
+    """
+    token = data.get("token")
+    user_data_dir = data.get("user_data_dir")
+    profile_directory = data.get("profile_directory", "Default")
+
+    if not token:
+        return {"success": False, "message": "token is required"}
+    if not user_data_dir:
+        return {"success": False, "message": "user_data_dir is required"}
+
+    token_hash = hash_token(token)
+    result = await db.execute(
+        select(AgentDevice).where(
+            AgentDevice.token_hash == token_hash,
+            AgentDevice.is_active == True,
+        )
+    )
+    device = result.scalar_one_or_none()
+    if not device:
+        raise HTTPException(status_code=403, detail="Invalid agent token")
+
+    result = await db.execute(
+        select(UserAgentProfile).where(UserAgentProfile.user_id == device.user_id)
+    )
+    profile = result.scalar_one_or_none()
+
+    if not profile:
+        profile = UserAgentProfile(
+            user_id=device.user_id,
+            user_data_dir=user_data_dir,
+            profile_directory=profile_directory,
+        )
+        db.add(profile)
+    else:
+        profile.user_data_dir = user_data_dir
+        profile.profile_directory = profile_directory
+        profile.updated_at = datetime.now(timezone.utc)
+
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": "Agent profile updated",
+        "data": {
+            "user_data_dir": profile.user_data_dir,
+            "profile_directory": profile.profile_directory,
+        },
+    }
+
+
 # ============================================================
 #  SYSTEM CHROME PROFILE DETECTION & IMPORT
 # ============================================================
