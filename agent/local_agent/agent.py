@@ -297,21 +297,26 @@ def load_or_create_profile():
 
     # 2. Local saved config (agent_config.json next to the exe)
     # This is always correct for THIS machine — check it BEFORE the DB API.
-    def _is_stale_config(config):
+    def _is_valid_local_config(config):
+        """Check if saved config has valid values and path exists on disk."""
         saved_dir = config.get("user_data_dir", "")
         saved_profile = config.get("profile_directory", "")
-        if saved_profile == "Default" and saved_dir.endswith("AutoSocialAI\\chrome_profile"):
-            return True
         if not saved_dir or not saved_profile:
+            return False
+        # Check that the profile directory actually exists on disk.
+        profile_path = os.path.join(saved_dir, saved_profile)
+        if os.path.isdir(profile_path):
             return True
-        return False
+        # For a fresh profile the sub-folder may not exist yet, but the
+        # user_data_dir itself should exist.
+        return os.path.isdir(saved_dir)
 
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "r") as f:
             config = json.load(f)
 
-        if _is_stale_config(config):
-            print("\n[WARN] Saved profile config is stale or generic (Default).")
+        if not _is_valid_local_config(config):
+            print("\n[WARN] Saved profile config is invalid or path doesn't exist.")
             print("[INFO] Please select your Chrome profile again.")
         else:
             print("\n[CONFIG] Chrome Profile Found")
